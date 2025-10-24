@@ -1924,7 +1924,6 @@ def export_config_with_templates(
         f.write("! ------------------------------------------------------------\n")
 
         if used_vlans:
-            f.write("! VLANES UTILIZADAS EN EL STACK\n")
             for vlan in sorted(used_vlans, key=int):
                 f.write(f"vlan {vlan}\n")
                 vlan_name = VLAN_NAME_MAP.get(vlan)
