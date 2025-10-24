@@ -921,12 +921,25 @@ def build_inventory_from_logs(filepaths: List[str]):
             all_iface_cfgs[(host, if_short)] = block
 
         for r in int_rows:
-            if r["status"] != "connected":
-                continue
+            status = r["status"].lower()
+            port_short = r["port"]
+            last_info = last_io_map.get(port_short)
+
+            def _has_recent_activity(info: Optional[Tuple[str, str, Optional[int]]]) -> bool:
+                if not info:
+                    return False
+                last_raw, output_raw, last_seconds = info
+                if last_raw and output_raw and last_raw.strip().lower() == "never" and output_raw.strip().lower() == "never":
+                    return False
+                return last_seconds is not None and last_seconds < INACTIVITY_THRESHOLD_SECONDS
+
+            if status != "connected":
+                if not (status == "notconnect" and _has_recent_activity(last_info)):
+                    continue
+
             vlan = r["vlan"].strip()
             if vlan in IGNORED_VLANS:
                 continue
-            port_short = r["port"]
             voice_vlan = voice_map.get(port_short)
 
             vlan_lc = vlan.lower()
@@ -938,7 +951,6 @@ def build_inventory_from_logs(filepaths: List[str]):
                     # Formatos raros no numéricos -> descartar
                     continue
 
-            last_info = last_io_map.get(port_short)
             if last_info:
                 last_raw, output_raw, last_seconds = last_info
                 if (
