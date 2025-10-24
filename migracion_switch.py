@@ -1137,31 +1137,43 @@ def export_excel(all_rows, out_dir):
     ]
     df = pd.DataFrame(all_rows, columns=cols)
 
-    with pd.ExcelWriter(xlsx, engine="xlsxwriter") as w:
-        df.to_excel(w, sheet_name="Mapeo", index=False)
-        wb = w.book
-        ws = w.sheets["Mapeo"]
+    sheet_defs = [
+        ("POE", "POE"),
+        ("AMBAR_T", "AMBAR_T"),
+        ("UCA", "UCA"),
+    ]
 
+    with pd.ExcelWriter(xlsx, engine="xlsxwriter") as w:
+        wb = w.book
         fmt_header = wb.add_format({'bold': True})
         fmt_libre  = wb.add_format({'bg_color': '#FFF59D'})
         fmt_uca    = wb.add_format({'bg_color': '#CFE8FF'})
         fmt_amb_t  = wb.add_format({'bg_color': '#E6F4EA'})
+        vlan_col_format = wb.add_format({'num_format': '@'})
 
-        ws.set_row(0, None, fmt_header)
-        ws.set_column("G:G", None, wb.add_format({'num_format': '@'}))
+        for sheet_name, group_tag in sheet_defs:
+            subset = df[df["_Grupo"] == group_tag]
+            if subset.empty:
+                continue
 
-        sw_actual_list = df["SW Actual"].tolist()
-        grupo_list     = df["_Grupo"].tolist()
-        for i in range(1, len(df)+1):
-            if str(sw_actual_list[i-1]).upper() == "LIBRE":
-                ws.set_row(i, None, fmt_libre)
-            elif grupo_list[i-1] == "UCA":
-                ws.set_row(i, None, fmt_uca)
-            elif grupo_list[i-1] == "AMBAR_T":
-                ws.set_row(i, None, fmt_amb_t)
+            subset.to_excel(w, sheet_name=sheet_name, index=False)
+            ws = w.sheets[sheet_name]
 
-        col_index = df.columns.get_loc("_Grupo")
-        ws.set_column(col_index, col_index, None, None, {'hidden': True})
+            ws.set_row(0, None, fmt_header)
+            ws.set_column("G:G", None, vlan_col_format)
+
+            sw_actual_list = subset["SW Actual"].tolist()
+            for row_idx in range(1, len(subset) + 1):
+                sw_actual = sw_actual_list[row_idx - 1]
+                if str(sw_actual).upper() == "LIBRE":
+                    ws.set_row(row_idx, None, fmt_libre)
+                elif group_tag == "UCA":
+                    ws.set_row(row_idx, None, fmt_uca)
+                elif group_tag == "AMBAR_T":
+                    ws.set_row(row_idx, None, fmt_amb_t)
+
+            col_index = subset.columns.get_loc("_Grupo")
+            ws.set_column(col_index, col_index, None, None, {'hidden': True})
 
     return xlsx
 
