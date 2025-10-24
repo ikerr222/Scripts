@@ -37,6 +37,9 @@ UCA_VLANS  = {
 }
 IGNORED_VLANS = {"606"}
 
+# --- Límites de actividad ---
+INACTIVITY_THRESHOLD_SECONDS = 13 * 7 * 24 * 3600  # 13 semanas
+
 # --- Catálogo de VLANs conocidas (para declarar solo las usadas por el stack) ---
 _VLAN_NAME_DATA = """
 2 AO-Aena
@@ -659,6 +662,15 @@ MAC_ROW_RE    = re.compile(
     r"(?P<type>STATIC|DYNAMIC)\s+(?P<port>.+?)\s*$", re.IGNORECASE
 )
 
+LINE_PROTOCOL_RE = re.compile(
+    r"^\s*(?P<ifname>\S+)\s+is\s+\S+,\s+line\s+protocol\s+is\s+\S+",
+    re.IGNORECASE,
+)
+LAST_IO_RE = re.compile(
+    r"^\s*Last\s+input\s+(?P<last>[^,]+),\s*output\s+(?P<output>[^,]+)",
+    re.IGNORECASE,
+)
+
 # show running-config (interfaces)
 IFACE_START_RE = re.compile(r"^\s*interface\s+(\S+)", re.IGNORECASE)
 VOICE_VLAN_RE  = re.compile(r"^\s*switchport\s+voice\s+vlan\s+(\d+)", re.IGNORECASE)
@@ -752,6 +764,78 @@ def parse_interface_configs_from_running_config(lines: List[str]) -> Dict[str, L
     flush()
     return iface_cfg
 
+
+def parse_time_interval(value: str) -> Optional[int]:
+    """Convierte cadenas de tiempo de IOS (e.g., '2w4d', '00:05:00') a segundos."""
+    if value is None:
+        return None
+    val = value.strip().lower()
+    if not val or val == "never":
+        return None
+
+    # Formato HH:MM:SS o MM:SS
+    if ":" in val and all(part.isdigit() for part in val.split(":")):
+        parts = [int(p) for p in val.split(":")]
+        if len(parts) == 3:
+            h, m, s = parts
+        elif len(parts) == 2:
+            h, m, s = 0, parts[0], parts[1]
+        else:
+            h, m, s = 0, 0, parts[0]
+        return h * 3600 + m * 60 + s
+
+    total = 0
+    matched = False
+    for number, suffix in re.findall(r"(\d+)\s*([a-z]+)", val):
+        matched = True
+        qty = int(number)
+        if suffix.startswith("y"):
+            total += qty * 365 * 24 * 3600
+        elif suffix.startswith("w"):
+            total += qty * 7 * 24 * 3600
+        elif suffix.startswith("d"):
+            total += qty * 24 * 3600
+        elif suffix.startswith("h"):
+            total += qty * 3600
+        elif suffix.startswith("m"):
+            total += qty * 60
+        elif suffix.startswith("s"):
+            total += qty
+    if matched:
+        return total
+
+    if val.isdigit():
+        return int(val)
+    return None
+
+
+def parse_last_io_information(lines: List[str]) -> Dict[str, Tuple[str, str, Optional[int]]]:
+    """Obtiene {if_short: (last_input_raw, output_raw, last_input_seconds)}."""
+    last_map: Dict[str, Tuple[str, str, Optional[int]]] = {}
+    current_if: Optional[str] = None
+
+    for raw in lines:
+        m_proto = LINE_PROTOCOL_RE.search(raw)
+        if m_proto:
+            current_if = to_short_ifname(m_proto.group("ifname"))
+            continue
+        if current_if:
+            m_last = LAST_IO_RE.search(raw)
+            if m_last:
+                last_raw = m_last.group("last").strip()
+                output_raw = m_last.group("output").strip()
+                seconds = parse_time_interval(last_raw)
+                last_map[current_if] = (last_raw, output_raw, seconds)
+                current_if = None
+                continue
+        if not raw.strip():
+            current_if = None
+            continue
+        # Cualquier línea que no aporte datos reinicia el estado
+        if LINE_PROTOCOL_RE.search(raw) is None and raw.strip().startswith("!"):
+            current_if = None
+    return last_map
+
 # ---------- Parser de logs ----------
 
 def parse_log(filepath: str):
@@ -813,8 +897,9 @@ def parse_log(filepath: str):
     # running-config: voice por interfaz + bloques por interfaz
     voice_map     = parse_voice_vlans_from_running_config(lines)
     iface_cfg_map = parse_interface_configs_from_running_config(lines)
+    last_io_map   = parse_last_io_information(lines)
 
-    return hostname, int_rows, mac_map, voice_map, iface_cfg_map
+    return hostname, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map
 
 # ---------- Inventarios ----------
 
@@ -829,7 +914,7 @@ def build_inventory_from_logs(filepaths: List[str]):
     all_iface_cfgs: Dict[Tuple[str, str], List[str]] = {}
 
     for fp in filepaths:
-        host, int_rows, mac_map, voice_map, iface_cfg_map = parse_log(fp)
+        host, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map = parse_log(fp)
 
         # Guarda bloques running por interfaz
         for if_short, block in iface_cfg_map.items():
@@ -851,6 +936,18 @@ def build_inventory_from_logs(filepaths: List[str]):
                     continue
                 else:
                     # Formatos raros no numéricos -> descartar
+                    continue
+
+            last_info = last_io_map.get(port_short)
+            if last_info:
+                last_raw, output_raw, last_seconds = last_info
+                if (
+                    last_raw and output_raw
+                    and last_raw.strip().lower() == "never"
+                    and output_raw.strip().lower() == "never"
+                ):
+                    continue
+                if last_seconds is not None and last_seconds >= INACTIVITY_THRESHOLD_SECONDS:
                     continue
 
             item = {
