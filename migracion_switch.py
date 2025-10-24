@@ -13,7 +13,7 @@ import re
 import sys
 import unicodedata
 from datetime import datetime
-from typing import Iterable, List, Dict, Tuple, Optional, Callable, Union
+from typing import Iterable, List, Dict, Tuple, Optional, Callable, Union, Set
 
 import pandas as pd
 
@@ -36,6 +36,587 @@ UCA_VLANS  = {
     "2215", "2216", "2217", "2218", "2219", "2221", "2222", "2230", "2300"
 }
 IGNORED_VLANS = {"606"}
+
+# --- Catálogo de VLANs conocidas (para declarar solo las usadas por el stack) ---
+_VLAN_NAME_DATA = """
+2 AO-Aena
+3 AO-UCA1-Red_Impar
+4 FTTH-Optima Facility
+5 CIAS-ADSL_SITA
+6 CIAS-AEA-(Groundforce)
+7 FTTH-Capiedal
+8 TPV-Aldeasa
+9 TPV-Vidal-Vidal
+10 CIAS-Emirates
+11 CIAS-Swissport Handling-FTTH
+12 CIAS-Lufthansa
+13 AO-Policia_1
+14 AO-DGGC-sitel
+15 CIAS-Hangar-ICGC-FTTH
+16 CIAS-British-Airways
+17 CIAS-TAP_SITA
+18 CIAS-AirNostrum
+19 CIAS-Cargolux
+20 AO-Monbus
+21 TPV-Areas
+22 AO-DGGC
+23 AO-Video_Conferencia
+24 CIAS-GALP_ADSL
+25 AO-SITA
+26 Reservado NGN
+27 CIAS-SwissTerminal
+28 CIAS-EmiratesCargo
+29 AO-UCA2-Red_Par
+30 CIAS-Continental
+31 CIAS-Acciona
+33 CIAS-Valoriza(optima Facility)
+34 TPV-LagardereTR
+35 TPV-Cristal
+36 CIAS-EuroDivisas
+37 Toip Vueling
+38 CIAS-SIXTFTTH
+39 AO-Mnto.Scadas
+40 CIAS-BRS-PRO
+41 AO-Parking-Vip
+42 CIAS-AGA
+43 AO-Siketing
+44 AO-SEGURIDAD
+45 CIAS-EASYJET-WAN_(ARINC)
+46 AO-Crtl Inst
+47 CIAS-SwissCargo
+48 TPV-Excess Baggage
+49 CIAS-Panasonic-FTTH
+50 AO-Cajeros_Cobro
+51 TPV-Whsmith
+52 AO-MWC2016
+53 AO-MossosToIP1
+54 TPV-Tous
+55 AO-MossosToIP2
+56 AO-IPV-Migration. BCN1200,1202,2200,2202
+57 AO- Live Migration HyperV  BCN1330,2330
+58 CIAS-Turkish-Airlines_ADSL
+59 CIAS-NorwegianCCAA
+60 TPV-PansFood
+61 TPV-Hertz T1
+62 TPV-La Tormenta Perfecta
+63 TPV-Hertz T2
+64 CIAS-AviancaAPH
+65 CIAS-Vueling
+66 AO-Taxis-VTc
+67 AO-Barix_Sate
+68 CIAS-EGYPTAIR
+69 AO-SICAM
+70 CIAS-NWGWIFI
+71 AO-ClientesADSL
+72 AO-VTC
+73 TPV-Superskunk
+74 TPV-BOBOLI
+75 CIAS-Gestair-FTTH
+76 AO-Qsystem y QMATIC
+77 AO-PilotoTaxis
+78 AO-AMBARCPISCAP
+79 CIAS-US_Airways
+80 TPV-Natura
+81 TPV-DOLCEMANIA(Neucroissant)
+82 TPV-Parfois
+83 AO-Eq_Inspec_T2
+84 AO-GCivilAdsl
+85 TPV-DMZ-Pans
+86 AO-MegafoniaT2_1
+87 AO-MegafoniaT2_2
+88 AO-PanelesDinamicos
+89 AO-Enlace tráfico BCN-FWBCNCPDeam
+90 TPV-EuroDivisas
+91 AO-Aena-SIRAM
+92 TPV-Capiedal-Parafarmacia
+93 TPV-Alehop (Clave Denia)
+94 CIAS-DMZAcciona
+95 CIAS-Aerospace-FTTH
+96 AO-Gestion_Cola
+97 AO-Aduanas
+98 AO-SirBCN
+99 AO-Sonometros_WIMAX
+100 AO-DMZFW
+101 AO-DMZINTERNET
+102 CIAS-Norwegian
+103 CIAS-TRABLISA
+104 CIAS-Alitalia
+105 TPV-Lolly
+106 TPV-Autogrill
+107 TPV-Brownie
+108 CIAS-GAMA
+109 AO-ATIS
+111 TPV-Truestar
+112 TPV-Lagardere
+113 AO-Xovis_Servers
+114 AO-Xovis_Devices1
+115 CIAS-Eurodivisas2
+116 CIAS-Arinc
+117 TPV-Premiere
+118 TPV-ChocolatFactory
+119 TPV-Farmacia
+120 AO-SAVIA
+121 TPV-Buff
+122 AO-EqTrazasSeg
+123 AO-Test
+124 TPV-PL2000 E tomas
+125 TPV-EXCESS_BAGGAGE_T2
+126 FTTH-SWIFTAIR
+127 TPV-Burberry
+128 AO-VehiclesElectrics
+129 TPV-GroupSerhs
+130 AO-icts
+131 AO-Argos
+132 AO-AudioMonitor
+133 AO-PilotoCGA
+134 AO-uca3
+135 AO-CA_Aire
+136 TPV-GroupSerhsWIFI
+137 AO-UCA_SBD_T2
+138 AO-UCA-5
+139 Wifi-Mossos
+140 CIAS-AirChina
+141 AO-SIPAS_SVC2
+142 AO-SIPAS_SVC3
+143 AO-DispSerT1
+144 AO-DispSerT2
+145 FTTH-ALEHOP
+146 TPV-Mango
+147 AO-PLCsCLASA
+148 CAPI-LUX
+149 CIAS-AmericanAirlines
+150 CIAS-AirFrance
+151 CIAS-SwissTransporte
+152 AO-Contadores T2
+153 TPV-Capi-Lux
+154 AO-TetraVortex
+155 AO-Videoconf_Life
+156 CIAS-Exterior_Plus
+157 AO-CUSS
+158 CIAS-LATAM
+159 CIAS-Lufthansa_WAN
+160 AO-CONCENTER-160
+161 AO-CMAC-Vlan Span 1
+162 AO-CMAC-VLAND_(GENESYS)
+163 AO-CMAC-VLANF_(NICE)
+164 AO-PMR
+165 AO-Autoinformacion
+166 TPV-Estanco
+167 AO-GSA_Servers
+168 AO-CCAA NTS
+169 AO-Puestos_CCAA
+170 TPV-Tuttifruti
+171 AO-CCAA NEA
+172 TPV-STAMP
+173 Wifi-Team
+174 CCTV aldeasa
+175 AO-CCAA NTS 3
+176 AO-CCAA NTS 4
+177 AO-CCAA NTS 5
+178 AO-CCAA NTS 6
+179 AO-CCAA NTS 7
+180 AO-CCAA NTS 8
+181 AO-CCAA NTS 9
+182 AO-CCAA NTS 10
+183 AO-CCAA NTS 11
+184 AO-CCAA NTS 12
+185 AO-CCAA NTS 2
+186 AO-CCAA NTS 13
+187 AO-CCAA NEA 2
+188 AO-Clientes
+189 Cisco live MWC
+190 AO-User_TIC
+191 AO-User_AenaBT
+192 AO-User_Aena
+193 AO-User_Externos
+194 AO-User_ESIA
+195 AO_Proselec
+196 AO-Operadores_CPD
+197 AO-Usuarios_Aena_T2
+198 AO-Operadores_CGA
+199 AO-User_AenaBT2
+200 AO-TVNetIP
+201 Replica Cabinas
+202 AO-Elecnor_SCADAS
+203 TPV-DMZ-Areas
+204 AO-VTH-T2
+205 CIAS-Sagital
+206 AO-Salas VIP
+207 AO_Tecosa_ADM_SAMD
+208 Lolacasademunt
+209 TPV-TED BAKER
+210 AO-AENA DN
+211 AO-AENA_SCCM
+212 AO-AENA DS
+213 TPV-HugoBoss ?????
+214 AO-AENA RESTO TERMINAL
+215 FTTH1 MOSSOS
+216 FTTH2 MOSSOS
+217 AO-Usuarios Win7
+218 AO-Xovis_Devices2
+219 AO-Xovis_Devices3
+220 AO-AENA_Impresoras
+221 AO-AENA PRINT DS
+222 AO-AENA PRINT RESTO TERMINAL
+223 AO-AENA_Print_Ricoh
+224 CIAS-IhandlinG_Rampa
+225 AO-AENA_KVM1
+226 AO-AENA_KVM2
+227 TPV-BurberryTheatre
+228 CIAS-IhandlinG_Ventas
+229 CIAS-Iberia_ToIP
+230 CIAS-LUFTHANSA_ToIP
+231 CIAS-Iberia_Oficinas
+232 CIAS-Iberia_UCA
+233 AO-NTP
+234 AO-INMETEO
+235 AO-ControlLuminico
+236 AO-RTU_T2
+237 AO-SiketingRSPAN
+238 AO-IberiaWifi
+239 AO-TempFira
+240 CIAS-EASPK
+241 TPV-ZaraT1
+242 FTTH-JAS
+243 TPV-LaMallorquina
+244 TPV-Repsol
+245 TPV-SSP
+246 TPV-JDSports
+247 TPV-McDonalds_Sky
+248 TPV-Barça
+249 WIFI Brownie
+251 TPV-SEPALEMEME(DESIGUAL)
+252 TPV-TravelRetail services
+253 AO-Mossos
+254 FTTH-Cathay
+255 TPV-Trade Center
+256 CIA-TradeCenter_ToIP_Internet
+257 CIAS-EasyJet-Oficinas
+258 CIAS-EasyJet-Wifi
+259 CIAS-Aegean Airlines
+260 CIAS-ELAL-WiFi
+261 AO-Scafis-gunebo
+262 AO-Cuss_T2
+263 AO-Cuss_T1
+264 CIAS-Gestion_SBD_BBC
+265 CIAS-Gestion_SBD_DSG
+266 CIAS-SGMT
+267 AO-SGESER
+268 CIAS-DeltaOficinas
+269 CIAS-NorwegianNIA
+270 TPV-Tutifrutti_Modulo_U
+271 Evento_BMW
+272 Tutti-Frutti_T1
+273 CIAS-Iberojet
+274 TPV-McDonalds_Int
+275 AO-Infinity
+276 CIAS-AirAlgerie_SITA
+277 AO-DENEVA
+278 CIAS-Mencies2
+279 volvo_evento_1
+280 volvo_evento_2
+281 CIAS-AegeanAirlines_ToIP
+282 TPV-SunglassHut
+283 AO_Tecosa_RX
+284 CIAS-Soltour
+285 TPV-Valerie
+286 AO-POLICIA_2
+287 AO-POLICIA_3
+288 CIAS-Mencies_Aviation
+289 AO-Cobro_Parking
+290 CIAS-ASIANA_APH
+291 Wifi-Sigma
+292 CIAS-QatarAirways
+293 CIAS-DeltaVentaBilletes
+294 AO-UsuarioVAP
+295 AO-TetraSDR
+296 AO-TetraBackup
+297 AO-CENTetra
+298 CIAS-JET2
+300 WIFI-Servidores
+301 WIFI-LWAPP1
+302 WIFI-LWAPP2
+303 WIFI-ADSL
+304 AO-FT1
+305 AO-FT2
+306 AO-FT3
+307 AO-FT4
+308 AO-FT5
+309 RSPAN-MiTTEL
+310 AO-DMZENA
+311 AO-IDCCCAA
+312 AO-Servers-NETID
+313 AO_CUSS_AVA
+314 AO_Clientes_AVA
+315 AO_Servidores_AVA
+316 AO_Gestion_Guardian
+317 AO_PIPRA_HHAA
+318 AO-Server_Lorawan_IT
+319 CIAS-VOLOTEA
+320 CIAS-AZULHANDLINGWIFI
+321 AO-EqCemant_X80
+322 CIAS-FTTH-FOTOVOLTAICA
+323 CIAS-WIFI-LATAM
+324 AO-CNP_Datos
+325 AO-CNP_ABC
+326 AO-CNP_Imagenes
+327 AO-CNP_Filtros_PCM_2
+328 AO-CNP_EES_Quioscos1
+329 AO-CNP_EES_Quioscos2
+330 AO-CNP_EES_PCAs-Tablets
+331 AO-CNP_EES_ABC
+332 AO-CNP_Sitel
+333 AO-EDS_Servidores
+334 AO_EDS_Remote
+335 AO_EDS-Campo
+336 AO_ATRS_Servidores
+337 AO_ATRS_Scadas
+338 AO_ATRS_Monitorizacion
+339 AO-ATRS_Scadas
+340 CIAS-Failover_SITA
+341 WIFI-Control Datos
+342 WIFI-Service WISM
+343 WIFI-Service WISM
+344 Vlan_1_WHSmith
+345 Vlan_2_WHSmith
+346 Vlan_3_WHSmith
+347 Vlan_4_WHSmith_HA
+348 WIFI-Datos1-T1_Singual_Roca_globos
+349 WIFI-Aena-T1
+350 WIFI-Aena-T2
+351 WIFI-Aena-Campus
+352 WIFI_Cortesia_T1
+353 WIFI_Cortesia_T2
+354 WIFI-Datos3-T2
+355 WIFI-Datos4-T2
+356 CIAS-WIFIWDF
+357 AO-AntenasLoraWan
+358 CIAS-EXCESS_BAGGAGE
+360 WIFI-APs_T1
+361 WIFI-APs_T2
+362 WIFI-Redundancia_WLC_T1
+363 WIFI-Redundancia_WLC_T2
+364 FTTH-Fernatrans_Cargo
+365 FTTH-Aviaparner
+366 Dufry_digital
+367 CIAS-LEVEL
+368 CIAS-EURPOCAR_ProvFTTH_T2
+369 CIAS-Vueling-Wifi_Firmas
+370 Wifi-CarritosT1
+371 AO-Carritos_EMV
+372 AO-SRECVEHI_T1
+373 AO-SRECVEHI_T2
+374 Wifi-Barça
+375 Wifi-Gatelink
+376 Wifi-Gatelink822
+378 Wifi-SITASEC
+379 WIFI-SITA_APHw_MGMT
+380 SCAP-T2
+381 SCAP-Servidores
+382 SCAP-Control
+383 SCAP-Video-Audio1
+384 SCAP-Campo
+385 SCAP-Video-Audio2
+386 PK_Larga_Estancia
+387 PK-ViaT
+388 PK_Express_VialesPares
+389 PK_Express_VialesImpares
+390 PK_Express_Cajeros
+391 PK_T2_VIAL_IMPAR
+392 PK_DMZ_UTEAS
+393 PK_InterfSIP_UTEAS
+394 BCN_INTERFONOS
+395 BCN_Dispositivos_PK
+400 AO-Macrolan_Aena
+401 AO-SITA-SATE
+402 Libre_RE DAN
+403 AO-Ges_Switch_Redan
+404 AO-Resina
+405 AO-Redan
+406 AO-Redan
+408 AO-Gestion_Radio_Enlace
+410 AO-NTP_T1
+411 AO-RFICHAR_T1
+412 AO-DMZSCAFISDGGC
+413 AO-CBTH_T2
+414 AO-Rdigital_T2
+415 AO-400Hz_T2
+420 AO-Pruebas_Argos
+428 AO-AnilloClimaIntermodal
+430 AO-ASC-WAN10
+431 AO-ASC-WAN1
+432 AO-ASC-WAN2
+433 AO-ASC-WAN3
+434 AO-ASC-WAN4
+435 AO-ASC-WAN5
+436 AO-ASC-WAN6
+437 AO-ASC-WAN7
+438 AO-ASC-WAN8
+439 AO-ASC-WAN9
+440 Free_Wifi_T1
+441 Free_Wifi_T2
+442 Free_Wifi_VIP_T1
+443 Free_Wifi_VIP_T2
+444 WIFI_Eventos_Vodafone
+445 AO-EventosInternet
+446 AO-ElectroSCIT2
+447 AO-HB_SMP_en_Hiper_V
+448 AO-HB_SIGMA_en_Hiper_V
+449 AO-HB_SCI_en_HiperV
+450 AO-INFECTADOS
+451 AO-SIPAV6-T2-Gen1
+452 CCTV_Termica
+453 AO-SIPAV6-T2-Gen2
+454 AO-SIPAV6-T2-Impar
+455 AO-SIPAV6-T2-Par
+456 AO-ULISES
+457 AO-EqCemantT2
+458 AO-IntfSIPPIPRA
+459 AO-IOKEEN
+460 AO-APNbcnUser
+461 AO-APNbcnDMZ
+462 AO-InterfoniaSIP
+463 AO-ReportColas
+464 AO-BIOPASS
+465 CIAS-SKYTANKING_Datos
+466 CIAS-SKYTANKING_Toip
+467 AO-InterfoniaPK
+468 AO-ElecnorMtoScadas
+469 AO-XovisDevices4
+470 AO-RemoteScreenig
+471 AO-ATRS
+472 AO-SRV-RemoteScreenig
+473 FTTH-ExteriorPlus
+474 AO-Backup-Cloud
+475 AO-Cabina-Cloud
+476 CIAS-Vueling-Sala201
+477 CIAS-Vueling-Wifi_Crew
+478 CIAS-Vueling_Almacen
+479 TPV-CarrefourMP
+480 CIA-Eurest_Ftth
+481 CIA-FCL-Backup
+482 TPV-Pikolinos
+500 AO-vSAN
+501 AO-VmWare_Vsan
+502 AO-VLAN_VMWARE_Fault_Tolerance
+503 AO-VLAN_VMWARE_Vmotion
+504 AO-vSAN_SMP
+505 AO-HCI_SQL_AlwaysON_smp
+506 AO-HCI_SQL_AlwaysON_genetec
+507 AO-HCI_HB_SCI
+508 AO-HCI_HB_SCE
+509 AO-HCI_HB_SIGMA
+510 AO-CCTV_AMBAR
+511 AO-CCTV_GUIAST2
+512 AO-CCTV_T2_Cabina
+513 AO-CCTV_T2_Ext
+514 AO-CCTV_T2_Roto
+520 AO-TVSENALETICA
+521 AO-HB_SAN_SCADA_SMP1
+522 AO-HB_SAN_SCADA_SMP2
+523 AO-HB_SAN_SCADA_SCE
+524 AO-HB_SAN_SCADA_OT
+525 AO-HB_SAN_SCADA_SMPPRE
+555 CIA-IBERIA_UCA
+556 AO-CNP_Axon/Taser
+557 AO-CNP_Img_CCTV
+558 AO-CNP_Videoconf
+629 AO-REVELA
+880 CIAS-AVOLTA_GAT
+881 CIAS-AVOLTA_POS
+882 CIAS-AVOLTA_POM
+883 CIAS-AVOLTA_WPT
+884 CIAS-AVOLTA_POK
+885 CIAS-AVOLTA_MED
+888 AO-UNION_RED_CENTRALITAS_MXONE
+911 Reservado_SDWAN
+950 CIAS-SINGAPORE
+951 CIAS-AIRFRANCE_CARGO
+961 CIAS-UnitedAirlinesSDWAN
+1100 AO-MTS_PRIMARY
+1111 AO-MTS_SECONDARY
+1200 Reservado_Telefonia_IP
+1201 Servidores_Telefonia_IP
+1202 CLAN_y_Media_Processor
+1203 Reservado_Telefonia_IP
+1204 Reservado_Telefonia_IP
+1205 AO-BCN_MXONE
+1206 Reservado_Telefonia_IP
+1207 Reservado_Telefonia_IP
+1208 Reservado_Telefonia_IP
+1210 Telefonos_IP_2
+1211 Telefonos_IP_3
+1212 Telefonos_IP_4
+1213 Telefonos_IP_CMAC
+1214 Reservado_Telefonos_IP
+1215 Interfonias_SIP
+1216 Reservado_Telefonos_IP
+1217 Reservado_Telefonos_IP
+1218 Reservado_Telefonos_IP
+1219 Reservado_Telefonos_IP
+1225 AO-MXONE1-ToIP
+1226 AO-MXONE2-ToIP
+1227 AO-MXONE3-ToIP
+1228 AO-MXONE4-ToIP
+1229 AO-MXONE5-ToIP
+1235 AO-MXONE_TA
+1236 AO-MXONE-MEGAFONIA
+1237 AO-Servidores_ContactCenter
+1238 Reservado_Telefonos_IP
+1239 Reservado_Telefonos_IP
+1245 Reservado_Telefonos_IP
+1246 Reservado_Telefonos_IP
+1247 AO-PK
+1248 AO-CENAT
+1249 Reservado_Telefonos_IP
+1250 Megafonia-EN54-SIP
+1251 Megafonia_AD01
+1252 Megafonia_AD02
+1253 Megafonia_AD03
+1254 Megafonia_AD04
+1255 Megafonia_AD05
+1256 Megafonia_AD06
+1257 Megafonia_AD07
+1258 Megafonia_AD08
+1259 Megafonia_AD09
+1260 AO-RADS
+1261 AO-EnlaceGS_MD110
+1262 Pruebas_ToIP_1262
+1263 Pruebas_ToIP_1263
+1264 AO-RADCENAT
+1265 AO-MEGA_DANTE
+1313 AO-GESNAC
+1333 Nuevo_WIFI_GUEST_T1
+1334 Nuevo_WIFI_GUEST_T2
+1444 Nuevo_WIFI_VIP_T1
+1445 Nuevo_WIFI_VIP_T2
+1800 VLAN-1800
+2214 UCA14
+2220 AO-SBDs_T1
+2401 AO-ConsoleSite-PR
+2501 AO-ConsoleSite-SC
+2529 AO-Pipra_Bcn
+3000 Reservado_SincronismoCoresAmbar
+3001 Reservado_SDWAN
+3100 AO-guias_atraque
+3101 AO-Equip_Aeron_T2
+3500 AO-GW_Lorawan_IT
+"""
+
+VLAN_NAME_MAP: Dict[str, str] = {}
+for _raw in _VLAN_NAME_DATA.strip().splitlines():
+    entry = _raw.strip()
+    if not entry:
+        continue
+    parts = entry.split(None, 1)
+    if not parts:
+        continue
+    vlan_id = parts[0]
+    if not vlan_id.isdigit():
+        continue
+    vlan_name = parts[1].strip() if len(parts) > 1 else ""
+    if vlan_name:
+        VLAN_NAME_MAP[vlan_id] = vlan_name
 
 # --- Capacidad y reservas del switch POE ---
 POE_MAX_PORTS          = 48
@@ -1249,7 +1830,6 @@ def _emit_base_template(
             for ln in extra_lines:
                 f.write(ln + ("\n" if not ln.endswith("\n") else ""))
 
-    f.write("!\n! === INTERFACES (clonadas del running) ===\n")
 
 def _filter_out_sticky(lines: List[str]) -> List[str]:
     """Remove sticky MAC entries while keeping the generic sticky command."""
@@ -1285,11 +1865,21 @@ def _ensure_security_basics(commands: List[str]) -> None:
             commands.append(line)
             existing.add(norm)
 
+def _stack_interface_sort_key(iface: str) -> Tuple[int, Tuple[int, ...], int, str]:
+    nums = [int(n) for n in re.findall(r"\d+", iface)]
+    if not nums:
+        return (10**6, (), 10**6, iface)
+    member = nums[0]
+    mid = tuple(nums[1:-1]) if len(nums) > 2 else ()
+    port = nums[-1]
+    return (member, mid, port, iface)
+
+
 def export_config_with_templates(
     rows: List[List[str]],
     out_dir: str,
     which: str,
-    iface_cfgs: Dict[Tuple[str,str], List[str]],
+    iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
     hostname_ambar: str,
     hostname_uca: str,
@@ -1305,15 +1895,21 @@ def export_config_with_templates(
 
     rows_sorted = [r for r in rows if r[-1] == which and r[0] != "LIBRE"]
 
-    def _config_sort_key(row: List[str]) -> Tuple[str, int, int, Tuple[int, ...], str]:
-        sw_name = row[5]
-        iface = row[3]
-        nums = [int(n) for n in re.findall(r"\d+", iface)]
-        member = nums[0] if nums else 10**6
-        port = nums[-1] if nums else 10**6
-        return sw_name, member, port, tuple(nums), iface
+    rows_by_switch: Dict[str, List[List[str]]] = {}
+    for row in rows_sorted:
+        rows_by_switch.setdefault(row[5], []).append(row)
 
-    rows_sorted.sort(key=_config_sort_key)
+    for sw_rows in rows_by_switch.values():
+        sw_rows.sort(key=lambda r: _stack_interface_sort_key(r[3]))
+
+    used_vlans: Set[str] = set()
+    for r in rows_sorted:
+        vlan = r[6]
+        if vlan and vlan.isdigit():
+            used_vlans.add(vlan)
+        m_voice = re.search(r"VOICE=(\d+)", r[8] or "")
+        if m_voice:
+            used_vlans.add(m_voice.group(1))
 
     forced_hostname = hostname_ambar if which in ("POE", "AMBAR_T") else hostname_uca
 
@@ -1327,51 +1923,62 @@ def export_config_with_templates(
         )
         f.write("! ------------------------------------------------------------\n")
 
-        current_sw_new = None
-        for r in rows_sorted:
-            sw_act, if_act, desc_act, if_new, desc_new, sw_new, vlan, mode, tags, mac, grupo = r
-
-            if sw_new != current_sw_new:
-                current_sw_new = sw_new
-                f.write(f"! Interfaces para {sw_new}\n")
-
-            block = iface_cfgs.get((sw_act, if_act))
-            f.write(f"interface {if_new}\n")
-
-            commands: List[str] = []
-            if block:
-                filtered = _filter_out_sticky(block)
-                has_desc = any(re.match(r"^\s*description\b", ln, re.IGNORECASE) for ln in filtered)
-                if (not has_desc) and desc_new and desc_new != "N/A":
-                    commands.append(f" description {desc_new}")
-                for ln in filtered:
-                    if re.match(r"^\s*interface\b", ln, re.IGNORECASE):
-                        continue
-                    commands.append(ln if ln.endswith("\n") else ln)
-            else:
-                commands.append(f" ! running-config no encontrado para {sw_act} {if_act}")
-                if desc_new and desc_new != "N/A":
-                    commands.append(f" description {desc_new}")
-                if vlan and vlan.isdigit():
-                    commands.append(f" switchport access vlan {vlan}")
-                    commands.append(" switchport mode access")
-
-            _ensure_security_basics(commands)
-
-            m_voice = re.search(r"VOICE=(\d+)", tags or "")
-            if m_voice:
-                voice_cmd = f" switchport voice vlan {m_voice.group(1)}"
-                if all(_normalize_command(cmd) != _normalize_command(voice_cmd) for cmd in commands):
-                    commands.append(voice_cmd)
-
-            for cmd in commands:
-                if cmd.endswith("\n"):
-                    f.write(cmd)
+        if used_vlans:
+            f.write("! VLANES UTILIZADAS EN EL STACK\n")
+            for vlan in sorted(used_vlans, key=int):
+                f.write(f"vlan {vlan}\n")
+                vlan_name = VLAN_NAME_MAP.get(vlan)
+                if vlan_name:
+                    f.write(f" name {vlan_name}\n")
                 else:
-                    f.write(cmd + "\n")
-            f.write("!\n")
+                    f.write(f" name VLAN_{vlan}\n")
+                f.write("!\n")
+        f.write("! ------------------------------------------------------------\n")
 
-        f.write("!\nend\n!\n")
+        if not rows_by_switch:
+            f.write("!\nend\n!\n")
+            return txt
+
+        for sw_new in sorted(rows_by_switch):
+            f.write(f"! Interfaces para {sw_new}\n")
+            for sw_act, if_act, desc_act, if_new, desc_new, _, vlan, mode, tags, mac, _ in rows_by_switch[sw_new]:
+                block = iface_cfgs.get((sw_act, if_act))
+                f.write(f"interface {if_new}\n")
+
+                commands: List[str] = []
+                if block:
+                    filtered = _filter_out_sticky(block)
+                    has_desc = any(re.match(r"^\s*description\b", ln, re.IGNORECASE) for ln in filtered)
+                    if (not has_desc) and desc_new and desc_new != "N/A":
+                        commands.append(f" description {desc_new}")
+                    for ln in filtered:
+                        if re.match(r"^\s*interface\b", ln, re.IGNORECASE):
+                            continue
+                        commands.append(ln if ln.endswith("\n") else ln)
+                else:
+                    commands.append(f" ! running-config no encontrado para {sw_act} {if_act}")
+                    if desc_new and desc_new != "N/A":
+                        commands.append(f" description {desc_new}")
+                    if vlan and vlan.isdigit():
+                        commands.append(f" switchport access vlan {vlan}")
+                        commands.append(" switchport mode access")
+
+                _ensure_security_basics(commands)
+
+                m_voice = re.search(r"VOICE=(\d+)", tags or "")
+                if m_voice:
+                    voice_cmd = f" switchport voice vlan {m_voice.group(1)}"
+                    if all(_normalize_command(cmd) != _normalize_command(voice_cmd) for cmd in commands):
+                        commands.append(voice_cmd)
+
+                for cmd in commands:
+                    if cmd.endswith("\n"):
+                        f.write(cmd)
+                    else:
+                        f.write(cmd + "\n")
+                f.write("!\n")
+
+            f.write("!\nend\n!\n")
 
     return txt
 
