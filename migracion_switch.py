@@ -1252,7 +1252,18 @@ def _emit_base_template(
     f.write("!\n! === INTERFACES (clonadas del running) ===\n")
 
 def _filter_out_sticky(lines: List[str]) -> List[str]:
-    return list(lines)
+    """Remove sticky MAC entries while keeping the generic sticky command."""
+    filtered: List[str] = []
+    for ln in lines:
+        if STICKY_LINE_RE.search(ln):
+            if re.match(r"^\s*switchport\s+port-security\s+mac-address\s+sticky\s*$", ln, re.IGNORECASE):
+                filtered.append(ln)
+            else:
+                # Descarta líneas que fijan direcciones MAC concretas.
+                continue
+        else:
+            filtered.append(ln)
+    return filtered
 
 def _normalize_command(cmd: str) -> str:
     return re.sub(r"\s+", " ", cmd.strip().lower()) if cmd.strip() else ""
@@ -1294,11 +1305,13 @@ def export_config_with_templates(
 
     rows_sorted = [r for r in rows if r[-1] == which and r[0] != "LIBRE"]
 
-    def _config_sort_key(row: List[str]) -> Tuple[str, float, str]:
+    def _config_sort_key(row: List[str]) -> Tuple[str, int, int, Tuple[int, ...], str]:
         sw_name = row[5]
         iface = row[3]
-        idx = _extract_if_index(iface)
-        return sw_name, float(idx) if idx is not None else float("inf"), iface
+        nums = [int(n) for n in re.findall(r"\d+", iface)]
+        member = nums[0] if nums else 10**6
+        port = nums[-1] if nums else 10**6
+        return sw_name, member, port, tuple(nums), iface
 
     rows_sorted.sort(key=_config_sort_key)
 
