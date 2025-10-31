@@ -636,6 +636,7 @@ WIFI_TWOGIG_LIMIT      = 36
 AMBAR_T_MAX_PORTS = 48
 UCA_DEFAULT_PORTS = 24
 UCA_LARGE_PORTS   = 48
+UCA_RESERVED_TAIL_FREE = 3
 
 # --- Rutas por defecto de plantillas base ---
 AMBAR_TEMPLATE_DEFAULT       = "AMBAR template actualizado v3.txt"
@@ -1333,14 +1334,15 @@ def _uca_switch_capacities(required_ports: int) -> List[int]:
     if remaining <= 0:
         return [UCA_DEFAULT_PORTS]
     while remaining > 0:
-        if remaining > max(UCA_LARGE_PORTS - 2, 0):
+        if remaining > max(UCA_LARGE_PORTS - UCA_RESERVED_TAIL_FREE, 0):
             cap = UCA_LARGE_PORTS
-        elif remaining > max(UCA_DEFAULT_PORTS - 2, 0):
+        elif remaining > max(UCA_DEFAULT_PORTS - UCA_RESERVED_TAIL_FREE, 0):
             cap = UCA_LARGE_PORTS
         else:
             cap = UCA_DEFAULT_PORTS
         capacities.append(cap)
-        remaining -= max(cap - 2, 0)
+        usable = max(cap - UCA_RESERVED_TAIL_FREE, 0)
+        remaining -= usable
     return capacities if capacities else [UCA_DEFAULT_PORTS]
 
 def make_mapping_uca(uca_items):
@@ -1353,7 +1355,7 @@ def make_mapping_uca(uca_items):
 
     for capacity in capacities:
         sw_name = _format_numbered_name(NEW_SWITCH_UCA_T_NAME, switch_ordinal)
-        usable = max(capacity - 2, 0)
+        usable = max(capacity - UCA_RESERVED_TAIL_FREE, 0)
         for port_idx in range(1, capacity + 1):
             if port_idx <= usable and idx_item < total_items:
                 rows.append(_mk_row(formatter, port_idx, uca_items[idx_item], sw_name, "UCA"))
@@ -2387,7 +2389,19 @@ def _emit_base_template(
             extra_lines = _uca_extra_base_lines()
         if extra_lines:
             f.write("!\n! === CONFIG BASE UCA ADICIONAL ===\n")
+            skip_vlan_block = False
             for ln in extra_lines:
+                stripped = ln.strip()
+                lower = stripped.lower()
+                if lower.startswith("vlan "):
+                    skip_vlan_block = True
+                    continue
+                if skip_vlan_block:
+                    if not stripped or stripped == "!":
+                        skip_vlan_block = False
+                        continue
+                    if lower.startswith("name "):
+                        continue
                 f.write(ln + ("\n" if not ln.endswith("\n") else ""))
     elif which == "VIDEO":
         extra_lines = _read_template_file(VIDEO_EXTRA_TEMPLATE_PATH)
@@ -2480,6 +2494,9 @@ def export_config_with_templates(
             used_vlans.add(m_voice.group(1))
         used_vlans.update(_vlans_from_tag_string(r[8]))
 
+    if which == "UCA" and include_vlan_623:
+        used_vlans.add("2230")
+
     forced_hostname = hostname_ambar if which in ("POE", "AMBAR_T") else hostname_uca
 
     with open(txt, "w", encoding="utf-8") as f:
@@ -2501,6 +2518,10 @@ def export_config_with_templates(
                 else:
                     f.write(f" name VLAN_{vlan}\n")
                 f.write("!\n")
+        if which == "UCA" and include_vlan_623:
+            f.write("interface Vlan2230\n")
+            f.write(" shutdown\n")
+            f.write("!\n")
         f.write("! ------------------------------------------------------------\n")
 
         if not rows_by_switch:
