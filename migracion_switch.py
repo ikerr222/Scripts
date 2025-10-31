@@ -1,11 +1,10 @@
 # ==============================================================================
 # Migración Ambar/UCA — Aplica BASE completa (según tipo) + Interfaces nuevas
-# (VERSIÓN SIN TRUNK: no genera ni usa puertos trunk ni port-channels)
 # - Pide hostname AMBAR (para POE y AMBAR_T) y hostname UCA (para UCA).
 # - Para cada switch destino:
 #     1) Inserta la PLANTILLA BASE COMPLETA del tipo (AMBAR/UCA), forzando 'hostname <pedido>'.
 #     2) Añade interfaces nuevas clonadas del running de origen (sin 'sticky').
-#     3) NO genera nada relativo a trunks o port-channels.
+#     3) Replica puertos trunk seleccionados al final del stack (sin port-channels).
 # ==============================================================================
 
 import os
@@ -674,6 +673,10 @@ LAST_IO_RE = re.compile(
 # show running-config (interfaces)
 IFACE_START_RE = re.compile(r"^\s*interface\s+(\S+)", re.IGNORECASE)
 VOICE_VLAN_RE  = re.compile(r"^\s*switchport\s+voice\s+vlan\s+(\d+)", re.IGNORECASE)
+TRUNK_ALLOWED_RE = re.compile(
+    r"^\s*switchport\s+trunk\s+allowed\s+vlan\s+(?:add\s+)?(.+)$",
+    re.IGNORECASE,
+)
 
 # --- Filtros de seguridad / parsing ---
 STICKY_LINE_RE   = re.compile(r"^\s*switchport\s+port-?security.*sticky\b", re.IGNORECASE)
@@ -763,6 +766,55 @@ def parse_interface_configs_from_running_config(lines: List[str]) -> Dict[str, L
                 buf.append(ln)
     flush()
     return iface_cfg
+
+
+def _expand_vlan_token(token: str) -> List[str]:
+    token = token.strip()
+    if not token or token.lower() in {"none", "all"}:
+        return []
+    if "-" in token:
+        try:
+            start, end = token.split("-", 1)
+            start_i = int(start)
+            end_i = int(end)
+        except ValueError:
+            return []
+        if end_i < start_i:
+            start_i, end_i = end_i, start_i
+        return [str(v) for v in range(start_i, end_i + 1)]
+    try:
+        return [str(int(token))]
+    except ValueError:
+        return []
+
+
+def _parse_allowed_vlans_from_block(block: Optional[List[str]]) -> List[str]:
+    if not block:
+        return []
+    vlans: Set[str] = set()
+    for line in block:
+        m = TRUNK_ALLOWED_RE.search(line)
+        if not m:
+            continue
+        raw_list = m.group(1)
+        for part in raw_list.split(","):
+            vlans.update(_expand_vlan_token(part))
+    return sorted(vlans, key=int)
+
+
+def _vlans_from_tag_string(tag_str: Optional[str]) -> Set[str]:
+    if not tag_str or tag_str == "N/A":
+        return set()
+    vlans: Set[str] = set()
+    for fragment in tag_str.split(";"):
+        frag = fragment.strip()
+        if not frag:
+            continue
+        if frag.upper().startswith("VLANS="):
+            values = frag.split("=", 1)[1]
+            for part in values.split(","):
+                vlans.update(_expand_vlan_token(part))
+    return vlans
 
 
 def parse_time_interval(value: str) -> Optional[int]:
@@ -906,11 +958,10 @@ def parse_log(filepath: str):
 def build_inventory_from_logs(filepaths: List[str]):
     """
     Devuelve:
-      - wifi_items, voip_items, uca_items, ambar_other_items (listas de dict)
+      - wifi_items, voip_items, uca_items, ambar_other_items, trunk_items (listas de dict)
       - all_iface_cfgs: {(host, if_short): [líneas running sin 'interface' ni '!']}
-    (Sin trunks: ignora entradas con VLAN 'trunk')
     """
-    wifi_items, voip_items, uca_items, ambar_other_items = [], [], [], []
+    wifi_items, voip_items, uca_items, ambar_other_items, trunk_items = [], [], [], [], []
     all_iface_cfgs: Dict[Tuple[str, str], List[str]] = {}
 
     for fp in filepaths:
@@ -943,14 +994,6 @@ def build_inventory_from_logs(filepaths: List[str]):
             voice_vlan = voice_map.get(port_short)
 
             vlan_lc = vlan.lower()
-            if not vlan.isdigit():
-                # Ignora explícitamente cualquier puerto en modo trunk
-                if vlan_lc == "trunk":
-                    continue
-                else:
-                    # Formatos raros no numéricos -> descartar
-                    continue
-
             if last_info:
                 last_raw, output_raw, last_seconds = last_info
                 if (
@@ -961,6 +1004,30 @@ def build_inventory_from_logs(filepaths: List[str]):
                     continue
                 if last_seconds is not None and last_seconds >= INACTIVITY_THRESHOLD_SECONDS:
                     continue
+
+            if vlan_lc == "trunk":
+                idx_value = _extract_if_index(port_short)
+                if idx_value is None or idx_value > 48:
+                    continue
+                name_field = r["name"] if r["name"] else ""
+                if "uplink" in name_field.lower():
+                    continue
+                allowed_vlans = _parse_allowed_vlans_from_block(iface_cfg_map.get(port_short))
+                trunk_items.append({
+                    "src_host": host,
+                    "src_port": port_short,
+                    "name": name_field if name_field else "N/A",
+                    "vlan": "trunk",
+                    "macs": mac_map.get(port_short, []),
+                    "voice_vlan": None,
+                    "mode": "trunk",
+                    "allowed_vlans": allowed_vlans,
+                })
+                continue
+
+            if not vlan.isdigit():
+                # Formatos raros no numéricos -> descartar
+                continue
 
             item = {
                 "src_host": host,
@@ -989,7 +1056,8 @@ def build_inventory_from_logs(filepaths: List[str]):
     voip_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     uca_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     ambar_other_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
-    return wifi_items, voip_items, uca_items, ambar_other_items, all_iface_cfgs
+    trunk_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
+    return wifi_items, voip_items, uca_items, ambar_other_items, trunk_items, all_iface_cfgs
 
 
 # ---------- Mapeos ----------
@@ -997,7 +1065,18 @@ def build_inventory_from_logs(filepaths: List[str]):
 def _mk_row(new_if_builder, idx_new, item, sw_name, group_tag):
     new_if = _resolve_new_interface(new_if_builder, idx_new)
     mac_str = ", ".join(item["macs"]) if item["macs"] else "N/A"
-    tag_str = f"VOICE={item['voice_vlan']}" if item.get("voice_vlan") else "N/A"
+    tags: List[str] = []
+    voice_vlan = item.get("voice_vlan")
+    if voice_vlan:
+        tags.append(f"VOICE={voice_vlan}")
+    allowed_vlans = item.get("allowed_vlans")
+    if allowed_vlans:
+        try:
+            ordered = sorted(allowed_vlans, key=int)
+        except ValueError:
+            ordered = sorted(allowed_vlans)
+        tags.append(f"VLANS={','.join(ordered)}")
+    tag_str = ";".join(tags) if tags else "N/A"
     return [
         item["src_host"],           # SW Actual
         item["src_port"],           # Interface actual
@@ -1005,8 +1084,8 @@ def _mk_row(new_if_builder, idx_new, item, sw_name, group_tag):
         new_if,                      # Interface nuevo
         item["name"],               # Description nueva
         sw_name,                     # SW Nuevo (interno / etiqueta)
-        item["vlan"],               # VLAN (informativo)
-        "access",                   # Mode (sin trunk)
+        item.get("vlan", "LIBRE"),  # VLAN (informativo)
+        item.get("mode", "access"),# Mode
         tag_str,                     # Tags (p.ej., VOICE=1229)
         mac_str,                     # MAC Actual
         group_tag                    # _Grupo
@@ -1063,14 +1142,20 @@ def _poe_member_capacities(required_slots: int):
         capacities.append(POE_MAX_PORTS)
     return capacities
 
-def make_mapping_poe(wifi_items, voip_items, ambar_others):
+def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     global POE_MEMBER_METADATA
     has_wifi = bool(wifi_items)
     has_voip = bool(voip_items)
     reserve_after_wifi = RESERVED_AFTER_WIFI if has_wifi else 0
     tail_free = RESERVED_TAIL_FREE if (has_wifi or has_voip) else 0
 
-    base_slots = len(wifi_items) + reserve_after_wifi + len(voip_items) + tail_free
+    base_slots = (
+        len(wifi_items)
+        + reserve_after_wifi
+        + len(voip_items)
+        + len(trunk_items)
+        + tail_free
+    )
     required_slots = base_slots
     if required_slots == 0 and ambar_others:
         max_stack_capacity = POE_MAX_PORTS * POE_MAX_STACK_MEMBERS
@@ -1115,6 +1200,7 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others):
     sequence.extend(("ITEM", it) for it in voip_items)
     sequence.extend(("ITEM", it) for it in ambar_for_poe)
     sequence.extend(("LIBRE", None) for _ in range(tail_free))
+    sequence.extend(("ITEM", it) for it in trunk_items)
 
     rows: List[List[str]] = []
     member_index = 1
@@ -2031,11 +2117,12 @@ def export_config_with_templates(
         m_voice = re.search(r"VOICE=(\d+)", r[8] or "")
         if m_voice:
             used_vlans.add(m_voice.group(1))
+        used_vlans.update(_vlans_from_tag_string(r[8]))
 
     forced_hostname = hostname_ambar if which in ("POE", "AMBAR_T") else hostname_uca
 
     with open(txt, "w", encoding="utf-8") as f:
-        f.write(f"!\n! Configuración generada ({which}) [SIN TRUNK]\n!\n")
+        f.write(f"!\n! Configuración generada ({which})\n!\n")
         _emit_base_template(
             f,
             forced_hostname=forced_hostname,
@@ -2066,6 +2153,13 @@ def export_config_with_templates(
                 f.write(f"interface {if_new}\n")
 
                 commands: List[str] = []
+                mode_lc = (mode or "").lower()
+                allowed_set = _vlans_from_tag_string(tags)
+                try:
+                    allowed_list = sorted(allowed_set, key=int)
+                except ValueError:
+                    allowed_list = sorted(allowed_set)
+                allowed_str = ",".join(allowed_list) if allowed_list else ""
                 if block:
                     filtered = _filter_out_sticky(block)
                     has_desc = any(re.match(r"^\s*description\b", ln, re.IGNORECASE) for ln in filtered)
@@ -2079,9 +2173,21 @@ def export_config_with_templates(
                     commands.append(f" ! running-config no encontrado para {sw_act} {if_act}")
                     if desc_new and desc_new != "N/A":
                         commands.append(f" description {desc_new}")
-                    if vlan and vlan.isdigit():
+                    if mode_lc == "trunk":
+                        commands.append(" switchport mode trunk")
+                        if allowed_str:
+                            commands.append(f" switchport trunk allowed vlan {allowed_str}")
+                    elif vlan and vlan.isdigit():
                         commands.append(f" switchport access vlan {vlan}")
                         commands.append(" switchport mode access")
+
+                if mode_lc == "trunk":
+                    norm_cmds = {_normalize_command(cmd) for cmd in commands if cmd and not cmd.strip().startswith("!")}
+                    if "switchport mode trunk" not in norm_cmds:
+                        commands.append(" switchport mode trunk")
+                    if allowed_str:
+                        if all(not _normalize_command(cmd).startswith("switchport trunk allowed vlan") for cmd in commands):
+                            commands.append(f" switchport trunk allowed vlan {allowed_str}")
 
                 _ensure_security_basics(commands)
 
@@ -2181,7 +2287,7 @@ def prompt_yes_no(question: str, *, default: bool = False) -> bool:
             return False
         print("  - Responde 'Si' o 'No' (también se aceptan S/N).")
 
-# ---------- Main (SIN TRUNK) ----------
+# ---------- Main ----------
 
 if __name__ == "__main__":
     include_vlan_623 = prompt_yes_no("¿Incluir configuración de gestión (VLAN 623) en AMBAR? Si/No")
@@ -2208,9 +2314,9 @@ if __name__ == "__main__":
         print("No se introdujeron ficheros. Saliendo.")
         raise SystemExit(0)
 
-    wifi_items, voip_items, uca_items, ambar_other_items, all_iface_cfgs = build_inventory_from_logs(inputs)
+    wifi_items, voip_items, uca_items, ambar_other_items, trunk_items, all_iface_cfgs = build_inventory_from_logs(inputs)
 
-    poe_rows, ambar_overflow = make_mapping_poe(wifi_items, voip_items, ambar_other_items)
+    poe_rows, ambar_overflow = make_mapping_poe(wifi_items, voip_items, ambar_other_items, trunk_items)
     ambar_t_rows = make_mapping_ambar_t(ambar_overflow) if ambar_overflow else []
     uca_rows = make_mapping_uca(uca_items)
 
@@ -2261,7 +2367,7 @@ if __name__ == "__main__":
         include_vlan_623=include_vlan_623,
     ) if uca_rows else None
 
-    print("\n¡Hecho (sin trunks)!")
+    print("\n¡Hecho!")
     print(f"  Excel: {os.path.abspath(xlsx_path)}")
     print(f"  Config POE:     {os.path.abspath(cfg_poe)}")
     if cfg_amb_t:
