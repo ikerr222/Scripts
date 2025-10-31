@@ -13,7 +13,7 @@ import re
 import sys
 import unicodedata
 from datetime import datetime
-from typing import Iterable, List, Dict, Tuple, Optional, Callable, Union, Set
+from typing import Iterable, List, Dict, Tuple, Optional, Callable, Union, Set, Any
 
 import pandas as pd
 
@@ -643,6 +643,7 @@ UCA_TEMPLATE_DEFAULT         = "UCA template actualizado v2.txt"
 AMBAR_EXTRA_TEMPLATE_DEFAULT = "ambar_config_base_extra.txt"
 UCA_EXTRA_TEMPLATE_DEFAULT   = "uca_config_base_extra.txt"
 VIDEO_TEMPLATE_DEFAULT       = "VIDEO template actualizado v2.txt"
+VIDEO_EXTRA_TEMPLATE_DEFAULT = "video_config_base_extra.txt"
 
 # --- Estado dinámico del mapeo POE ---
 POE_MEMBER_METADATA: Dict[int, Dict[str, object]] = {}
@@ -1230,66 +1231,73 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         }
 
     total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
-    if base_slots > total_usable:
-        raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP/tail configurados")
 
-    slots_for_ambar = max(0, total_usable - base_slots)
+    base_fixed = (
+        len(wifi_items)
+        + reserve_after_wifi
+        + len(voip_items)
+        + len(trunk_items)
+    )
+    if base_fixed > total_usable:
+        raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP configurados")
+
+    available_for_payload = total_usable - base_fixed
+    slots_for_ambar = min(len(ambar_others), available_for_payload)
     ambar_for_poe = ambar_others[:slots_for_ambar]
     ambar_overflow = ambar_others[slots_for_ambar:]
+    remaining_after_ambar = max(0, available_for_payload - slots_for_ambar)
+    tail_free_effective = min(tail_free, remaining_after_ambar)
 
     sequence = []
     sequence.extend(("ITEM", it) for it in wifi_items)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
     sequence.extend(("ITEM", it) for it in voip_items)
     sequence.extend(("ITEM", it) for it in ambar_for_poe)
-    sequence.extend(("LIBRE", None) for _ in range(tail_free))
+    sequence.extend(("LIBRE", None) for _ in range(tail_free_effective))
     sequence.extend(("ITEM", it) for it in trunk_items)
 
     rows: List[List[str]] = []
     member_index = 1
+    member_info = POE_MEMBER_METADATA[member_index]
+    usable_capacity = int(member_info["usable_capacity"])
+    total_ports = int(member_info["capacity"])
+    formatter = _poe_interface_formatter(member_index)
+    sw_name = str(member_info["sw_name"])
     idx = 1
 
+    def flush_current(start_idx: int) -> None:
+        if usable_capacity > 0 and start_idx <= usable_capacity:
+            _pad_member_with_libres(rows, formatter, sw_name, start_idx, usable_capacity, "POE")
+        _pad_member_with_libres(rows, formatter, sw_name, usable_capacity + 1, total_ports, "POE")
+
     for kind, payload in sequence:
-        while True:
+        while usable_capacity <= 0 or idx > usable_capacity:
+            flush_current(idx)
+            member_index += 1
+            if member_index > len(capacities):
+                raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
             member_info = POE_MEMBER_METADATA[member_index]
-            capacity = int(member_info["capacity"])
             usable_capacity = int(member_info["usable_capacity"])
+            total_ports = int(member_info["capacity"])
             formatter = _poe_interface_formatter(member_index)
             sw_name = str(member_info["sw_name"])
+            idx = 1
 
-            if usable_capacity <= 0:
-                _pad_member_with_libres(rows, formatter, sw_name, 1, capacity, "POE")
-                member_index += 1
-                if member_index > len(capacities):
-                    raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
-                idx = 1
-                continue
+        if kind == "ITEM":
+            rows.append(_mk_row(formatter, idx, payload, sw_name, "POE"))
+        else:
+            rows.append(_libre_row(formatter, idx, sw_name, "POE"))
+        idx += 1
 
-            if idx > usable_capacity:
-                _pad_member_with_libres(rows, formatter, sw_name, max(idx, usable_capacity + 1), capacity, "POE")
-                member_index += 1
-                if member_index > len(capacities):
-                    raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
-                idx = 1
-                continue
-
-            if kind == "ITEM":
-                rows.append(_mk_row(formatter, idx, payload, sw_name, "POE"))
-            else:
-                rows.append(_libre_row(formatter, idx, sw_name, "POE"))
-            idx += 1
-            break
-
-    while True:
+    flush_current(idx)
+    while member_index < len(capacities):
+        member_index += 1
         member_info = POE_MEMBER_METADATA[member_index]
-        capacity = int(member_info["capacity"])
+        usable_capacity = int(member_info["usable_capacity"])
+        total_ports = int(member_info["capacity"])
         formatter = _poe_interface_formatter(member_index)
         sw_name = str(member_info["sw_name"])
-        _pad_member_with_libres(rows, formatter, sw_name, idx, capacity, "POE")
-        if member_index >= len(capacities):
-            break
-        member_index += 1
-        idx = 1
+        flush_current(1)
 
     return rows, ambar_overflow
 
@@ -1428,10 +1436,9 @@ def export_excel(all_rows, out_dir):
         wb = w.book
         fmt_header = wb.add_format({'bold': True})
         fmt_libre  = wb.add_format({'bg_color': '#FFF59D'})
-        fmt_uca    = wb.add_format({'bg_color': '#CFE8FF'})
-        fmt_amb_t  = wb.add_format({'bg_color': '#E6F4EA'})
-        fmt_video  = wb.add_format({'bg_color': '#FFF0F5'})
         vlan_col_format = wb.add_format({'num_format': '@'})
+        palette = ['#E3F2FD', '#FCE4EC', '#E8F5E9', '#FFF3E0', '#EDE7F6', '#F1F8E9', '#E0F7FA']
+        color_format_cache: Dict[str, Any] = {}
 
         for sheet_name, group_tag in sheet_defs:
             subset = df[df["_Grupo"] == group_tag]
@@ -1445,16 +1452,28 @@ def export_excel(all_rows, out_dir):
             ws.set_column("G:G", None, vlan_col_format)
 
             sw_actual_list = subset["SW Actual"].tolist()
+            sw_new_list = subset["SW Nuevo"].tolist()
+            unique_switches = list(dict.fromkeys(sw_new_list))
+            switch_formats: Dict[str, Any] = {}
+            for idx_sw, sw in enumerate(unique_switches):
+                if not sw:
+                    continue
+                color = palette[idx_sw % len(palette)]
+                fmt = color_format_cache.get(color)
+                if fmt is None:
+                    fmt = wb.add_format({'bg_color': color})
+                    color_format_cache[color] = fmt
+                switch_formats[sw] = fmt
+
             for row_idx in range(1, len(subset) + 1):
                 sw_actual = sw_actual_list[row_idx - 1]
                 if str(sw_actual).upper() == "LIBRE":
                     ws.set_row(row_idx, None, fmt_libre)
-                elif group_tag == "UCA":
-                    ws.set_row(row_idx, None, fmt_uca)
-                elif group_tag == "AMBAR_T":
-                    ws.set_row(row_idx, None, fmt_amb_t)
-                elif group_tag == "VIDEO":
-                    ws.set_row(row_idx, None, fmt_video)
+                else:
+                    sw_new = sw_new_list[row_idx - 1]
+                    fmt = switch_formats.get(sw_new)
+                    if fmt:
+                        ws.set_row(row_idx, None, fmt)
 
             col_index = subset.columns.get_loc("_Grupo")
             ws.set_column(col_index, col_index, None, None, {'hidden': True})
@@ -1487,6 +1506,7 @@ UCA_TEMPLATE_PATH         = pick_existing_path(UCA_TEMPLATE_DEFAULT)         or 
 AMBAR_EXTRA_TEMPLATE_PATH = pick_existing_path(AMBAR_EXTRA_TEMPLATE_DEFAULT) or AMBAR_EXTRA_TEMPLATE_DEFAULT
 UCA_EXTRA_TEMPLATE_PATH   = pick_existing_path(UCA_EXTRA_TEMPLATE_DEFAULT)   or UCA_EXTRA_TEMPLATE_DEFAULT
 VIDEO_TEMPLATE_PATH       = pick_existing_path(VIDEO_TEMPLATE_DEFAULT)       or VIDEO_TEMPLATE_DEFAULT
+VIDEO_EXTRA_TEMPLATE_PATH = pick_existing_path(VIDEO_EXTRA_TEMPLATE_DEFAULT) or VIDEO_EXTRA_TEMPLATE_DEFAULT
 
 def _read_template_file(path: str) -> List[str]:
     if not os.path.exists(path):
@@ -1570,21 +1590,14 @@ def _ambar_extra_base_lines() -> List[str]:
         "spanning-tree mst max-age 6",
         "spanning-tree mst max-hops 4",
         "!",
-        "vlan 623",
-        "name BCN_ACC_GESTION_AMBAR",
-        "!",
         "interface GigabitEthernet0/0",
         " vrf forwarding Mgmt-vrf",
         " ip address 6.6.6.6 255.255.255.252",
         " negotiation auto",
         "no shutdown",
         "!",
-        "interface Vlan623",
-        " ip address 10.192.130.xx 255.255.254.0",
-        "!",
         "lldp run",
         "!",
-        "ip tftp source-interface Vlan623",
         "ip ssh time-out 60",
         "ip ssh authentication-retries 2",
         "ip ssh version 2",
@@ -1610,8 +1623,6 @@ def _ambar_extra_base_lines() -> List[str]:
         "ip http authentication aaa login-authentication TAC-AUTH",
         "ip http authentication aaa exec-authorization TAC-AUTO",
         "ip http secure-server",
-        "ip http client source-interface Vlan623",
-        "ip tftp source-interface Vlan623",
         "ip tftp blocksize 512",
         "ip ssh time-out 60",
         "ip ssh authentication-retries 2",
@@ -1774,7 +1785,6 @@ def _ambar_extra_base_lines() -> List[str]:
         " login authentication TAC-AUTH",
         " transport preferred ssh",
         "!",
-        "ntp source Vlan623",
         "ntp server 104.253.1.1",
         "ntp server 104.253.1.2",
         "!",
@@ -1794,6 +1804,21 @@ def _ambar_extra_base_lines() -> List[str]:
         "! -------------------------------------------------------",
     ])
     return lines
+
+
+def _ambar_vlan_623_lines() -> List[str]:
+    return [
+        "vlan 623",
+        " name BCN_ACC_GESTION_AMBAR",
+        "!",
+        "interface Vlan623",
+        " ip address 10.192.130.1XX 255.255.254.0",
+        "!",
+        "ip tftp source-interface Vlan623",
+        "ip http client source-interface Vlan623",
+        "ip tftp source-interface Vlan623",
+        "ntp source Vlan623",
+    ]
 
 def _uca_extra_base_lines() -> List[str]:
     lines = [
@@ -2081,6 +2106,242 @@ def _uca_extra_base_lines() -> List[str]:
     ]
     return lines
 
+
+def _video_extra_base_lines() -> List[str]:
+    lines = [
+        "service password-encryption",
+        "!",
+        "aaa new-model",
+        "aaa group server tacacs+ ISE_GROUP",
+        " server name ISE",
+        " server name ISE2",
+        "aaa authentication username-prompt LOCAL_username:",
+        "aaa authentication password-prompt LOCAL_password:",
+        "aaa authentication login TAC-AUTH group tacacs+ local",
+        "aaa authorization config-commands",
+        "aaa authorization exec TAC-AUTO group tacacs+ local if-authenticated",
+        "aaa authorization commands 0 default group tacacs+ local",
+        "aaa authorization commands 1 default group tacacs+ local",
+        "aaa authorization commands 15 default group tacacs+ local",
+        "aaa accounting exec TAC-ACC start-stop group tacacs+",
+        "aaa accounting commands 0 default start-stop group tacacs+",
+        "aaa accounting commands 1 default start-stop group tacacs+",
+        "aaa accounting commands 15 default start-stop group tacacs+",
+        "aaa session-id common",
+        "!",
+        "ip routing",
+        "ip multicast-routing",
+        "ip multicast multipath",
+        "!",
+        "ip name-server 104.16.99.100",
+        "no ip domain lookup",
+        "ip domain name aena.es",
+        "!",
+        "login block-for 30 attempts 10 within 60",
+        "!",
+        "lldp run",
+        "!",
+        "ip tftp source-interface Loopback0",
+        "ip ssh time-out 60",
+        "ip ssh authentication-retries 2",
+        "ip ssh version 2",
+        "ip scp server enable",
+        "!",
+        "archive",
+        " log config",
+        "  logging enable",
+        "  logging size 500",
+        "  notify syslog contenttype plaintext",
+        "memory free low-watermark processor 134148",
+        "!",
+        "enable secret 0 Aena.2025!",
+        "!",
+        "username admin privilege 15 secret 0 7BCN@ena.2024,",
+        "!",
+        "interface GigabitEthernet0/0",
+        " vrf forwarding Mgmt-vrf",
+        " ip address 6.6.6.6 255.255.255.252",
+        " negotiation auto",
+        "no shutdown",
+        "!",
+        "interface Loopback0",
+        " ip address 10.192.132.11 255.255.255.255",
+        "!",
+        "ip default-gateway 10.192.133.254",
+        "ip pim rp-address 104.241.254.254",
+        "ip pim register-source Loopback0",
+        "ip forward-protocol nd",
+        "no ip http server",
+        "ip http authentication aaa login-authentication TAC-AUTH",
+        "ip http authentication aaa exec-authorization TAC-AUTO",
+        "ip http secure-server",
+        "ip http client source-interface Loopback0",
+        "ip tftp source-interface Loopback0",
+        "ip tftp blocksize 512",
+        "ip ssh time-out 60",
+        "ip ssh authentication-retries 2",
+        "ip ssh version 2",
+        "ip scp server enable",
+        "!",
+        "logging trap debugging",
+        "logging host 4.9.0.135",
+        "logging host 104.16.0.225",
+        "logging host 104.18.220.10",
+        "!",
+        "tacacs server ISE",
+        " address ipv4 104.16.0.210",
+        " key 0 @V1de0.2024!",
+        "tacacs server ISE2",
+        " address ipv4 104.16.0.211",
+        " key 0 @V1de0.2024!",
+        "!",
+        "snmp-server group V3groupDCOM v3 priv notify *tv.FFFFFFFF.FFFFFFFF.FFFFFFFF.FFFFFFFF7F",
+        "snmp-server group V3groupDCOM v3 priv read V3bcnVIDro write V3bcnVIDrw",
+        "snmp-server view V3bcnVIDBro iso included",
+        "snmp-server view V3bcnVIDrw iso included",
+        "snmp-server view nacview iso included",
+        "snmp-server view V3bcnVIDro iso included",
+        "snmp-server community V3bcnVIDro RO",
+        "snmp-server community V3bcnVIDrw RW",
+        "snmp-server user V3Dcom V3groupDCOM v3 auth sha #2024@En@! priv des @En@,.2025!",
+        "snmp-server enable traps",
+        "snmp-server host 104.16.0.225 version 2c GreBCNro",
+        "snmp-server host 104.16.0.225 version 3 priv V3gesred",
+        "snmp-server host 4.9.0.135 version 2c GreBCNro",
+        "snmp-server host 4.9.0.135 version 3 priv V3gesred",
+        "snmp-server host 104.18.220.10 version 2c GreBCNro",
+        "snmp-server host 104.18.220.10 version 3 priv V3gesred",
+        "snmp-server source-interface traps loopback 0",
+        "!",
+        "banner exec ^C",
+        "Session established to $(hostname) on line $(line)",
+        "^C",
+        "banner incoming ^C",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! PROHIBIDO !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "!!                                                                            !!",
+        "!!           Queda totalmente prohibido el uso del protocolo TELNET           !!",
+        "!!                   Contacte con el administrador de la red                  !!",
+        "!!                                                                            !!",
+        "!!           The use of the TELNET protocol is completely prohibited          !!",
+        "!!                       Contact the network administrator                    !!",
+        "!!                                                                            !!",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! FORBIDDEN !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "^C",
+        "banner login ^C",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ATENCION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "!!                                                                            !!",
+        "!!                          Solo personal autorizado                          !!",
+        "!!                                                                            !!",
+        "!!                          Authorized personal only                          !!",
+        "!!                                                                            !!",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CAUTION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "^C",
+        "banner motd ^C",
+        "********************************************************************************",
+        "**                                                                            **",
+        "**                       AENA - Aeropuerto Barcelona                          **",
+        "**                                                                            **",
+        "**         Division de Tecnologias de la Informacion y Comunicaciones         **",
+        "**                                                                            **",
+        "**                  Esta accediendo a un sistema protegido                    **",
+        "**          Si no esta autorizado cierre inmediatamente su conexion           **",
+        "**                  La manipulacion no autorizada infringe                    **",
+        "**             la ley 21/2003, de 7 de Julio, de Seguridad Aerea              **",
+        "**                                                                            **",
+        "********************************************************************************",
+        "**                                                                            **",
+        "**                         This is a Private System                           **",
+        "**          If you are not authorized close your connection inmediatly        **",
+        "**                    Unauthorized access is regulated by                     **",
+        "**                   Air Security Law 21/2003, 7th of July                    **",
+        "**                                                                            **",
+        "********************************************************************************",
+        "|                          Informacion de Acceso",
+        "|                          Equipo: $(hostname)",
+        "|",
+        "|                       Autorizacion mediante TACACS+",
+        "|",
+        "^C",
+        "banner prompt-timeout ^C",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ADVERTENCIA !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "!!                                                                            !!",
+        "!!                      Ha experiado el tiempo de session                     !!",
+        "!!                                                                            !!",
+        "!!                        Has experienced session time                        !!",
+        "!!                                                                            !!",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "^C",
+        "banner config-save ^C",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMACION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "!!                                                                            !!",
+        "!!         Desea realizar una copia de la configuracion en ejecucion          !!",
+        "!!                                                                            !!",
+        "!!           You want to make a copy of the running configuration             !!",
+        "!!                                                                            !!",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMATION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "^C",
+        "!",
+        "line con 0",
+        " session-timeout 15",
+        " exec-timeout 15 0",
+        " authorization exec TAC-AUTO",
+        " accounting exec TAC-ACC",
+        " logging synchronous",
+        " login authentication TAC-AUTH",
+        " stopbits 1",
+        "line vty 0 4",
+        " session-timeout 15",
+        " exec-timeout 15 0",
+        " authorization exec TAC-AUTO",
+        " accounting exec TAC-ACC",
+        " logging synchronous",
+        " login authentication TAC-AUTH",
+        " transport preferred ssh",
+        "line vty 5 15",
+        " session-timeout 15",
+        " exec-timeout 15 0",
+        " authorization exec TAC-AUTO",
+        " accounting exec TAC-ACC",
+        " logging synchronous",
+        " login authentication TAC-AUTH",
+        " transport preferred ssh",
+        "!",
+        "ntp source Loopback0",
+        "ntp server 104.253.1.1",
+        "ntp server 104.253.1.2",
+        "!",
+        "access-list 10 permit 89.1.7.153",
+        "access-list 10 remark Gestion_VIDEO",
+        "access-list 10 permit 10.192.128.0 0.255.255.255",
+        "access-list 10 permit 104.16.0.0 0.0.255.255",
+        "access-list 10 permit 104.8.20.0 0.0.0.255",
+        "access-list 10 permit 104.1.0.0 0.0.255.255",
+        "access-list 10 permit 10.192.132.0 0.0.1.255",
+        "access-list 10 permit 172.24.3.0 0.0.0.255",
+        "access-list 10 permit 172.24.5.0 0.0.0.255",
+        "access-list 10 permit 172.24.32.0 0.0.0.255",
+        "access-list 10 permit 172.24.37.0 0.0.0.255",
+        "access-list 10 permit 104.192.128.0 0.0.255.255",
+        "!",
+        "snmp-server location <LOCATION ANTIGUO SWITCH>",
+        "snmp-server contact dmanau@aena.es",
+        "!",
+        "router ospf 1",
+        " log-adjacency-changes",
+        " area 18 stub no-summary",
+        " area 120 stub no-summary",
+        " timers throttle spf 100 100 1000",
+        " timers throttle lsa all 5 5 200",
+        " redistribute connected",
+        " network X.X.X.X 0.0.0.255 area 18",
+        " network 104.129.18.0 0.0.0.255 area 18",
+        " network 104.131.18.0 0.0.0.255 area 18",
+        " network 104.241.2.50 0.0.0.0 area 18",
+        " network 104.241.2.54 0.0.0.0 area 18",
+        "!",
+    ]
+    return lines
+
 def _emit_base_template(
     f,
     forced_hostname: str,
@@ -2118,18 +2379,22 @@ def _emit_base_template(
                 f.write(ln + ("\n" if not ln.endswith("\n") else ""))
         if include_vlan_623:
             f.write("!\n! === CONFIG ADICIONAL VLAN 623 ===\n")
-            f.write("vlan 623\n")
-            f.write(" name BCN_ACC_GESTION_AMBAR\n")
-            f.write("!\n")
-            f.write("interface Vlan623\n")
-            f.write(" ip address 10.192.130.1XX 255.255.254.0\n")
-            f.write("!\n")
+            for ln in _ambar_vlan_623_lines():
+                f.write(ln + ("\n" if not ln.endswith("\n") else ""))
     elif which == "UCA":
         extra_lines = _read_template_file(UCA_EXTRA_TEMPLATE_PATH)
         if not extra_lines:
             extra_lines = _uca_extra_base_lines()
         if extra_lines:
             f.write("!\n! === CONFIG BASE UCA ADICIONAL ===\n")
+            for ln in extra_lines:
+                f.write(ln + ("\n" if not ln.endswith("\n") else ""))
+    elif which == "VIDEO":
+        extra_lines = _read_template_file(VIDEO_EXTRA_TEMPLATE_PATH)
+        if not extra_lines:
+            extra_lines = _video_extra_base_lines()
+        if extra_lines:
+            f.write("!\n! === CONFIG BASE VIDEO ADICIONAL ===\n")
             for ln in extra_lines:
                 f.write(ln + ("\n" if not ln.endswith("\n") else ""))
 
@@ -2321,9 +2586,6 @@ def export_config_video(
     for row in rows_sorted:
         rows_by_switch.setdefault(row[5], []).append(row)
 
-    for sw_rows in rows_by_switch.values():
-        sw_rows.sort(key=lambda r: _stack_interface_sort_key(r[3]))
-
     with open(txt, "w", encoding="utf-8") as f:
         f.write("!\n! Configuración generada (VIDEO)\n!\n")
         _emit_base_template(f, forced_hostname=hostname_video, which="VIDEO")
@@ -2436,7 +2698,8 @@ def prompt_yes_no(question: str, *, default: bool = False) -> bool:
 # ---------- Main ----------
 
 if __name__ == "__main__":
-    include_vlan_623 = prompt_yes_no("¿Incluir configuración de gestión (VLAN 623) en AMBAR? Si/No")
+    is_less_than_200 = prompt_yes_no("¿El switch es menor de 200? Si/No")
+    include_vlan_623 = is_less_than_200
 
     cli_args = sys.argv[1:]
     if cli_args:
