@@ -2,9 +2,10 @@
 # Migración Ambar/UCA — Aplica BASE completa (según tipo) + Interfaces nuevas
 # - Pide hostname AMBAR (para POE y AMBAR_T) y hostname UCA (para UCA).
 # - Para cada switch destino:
-#     1) Inserta la PLANTILLA BASE COMPLETA del tipo (AMBAR/UCA), forzando 'hostname <pedido>'.
+#     1) Inserta la PLANTILLA BASE COMPLETA del tipo (AMBAR/UCA/VIDEO), forzando 'hostname <pedido>'.
 #     2) Añade interfaces nuevas clonadas del running de origen (sin 'sticky').
-#     3) Replica puertos trunk seleccionados al final del stack (sin port-channels).
+#     3) Replica puertos trunk seleccionados al final del stack (sin port-channels) en AMBAR.
+#     4) Para VIDEO respeta el orden original de las interfaces y no aplica filtros de actividad.
 # ==============================================================================
 
 import os
@@ -25,6 +26,9 @@ NEW_IF_AMBAR_T_PREFIX   = "GigabitEthernet1/0/"
 
 NEW_SWITCH_UCA_T_NAME   = "SW-NUEVO-UCA-T-01"
 NEW_IF_UCA_T_PREFIX     = "GigabitEthernet1/0/"
+
+NEW_SWITCH_VIDEO_NAME   = "SW-NUEVO-VIDEO-01"
+NEW_IF_VIDEO_PREFIX     = "GigabitEthernet1/0/"
 
 # --- Conjuntos de VLAN objetivo ---
 WIFI_VLANS = {"360", "361"}
@@ -638,6 +642,7 @@ AMBAR_TEMPLATE_DEFAULT       = "AMBAR template actualizado v3.txt"
 UCA_TEMPLATE_DEFAULT         = "UCA template actualizado v2.txt"
 AMBAR_EXTRA_TEMPLATE_DEFAULT = "ambar_config_base_extra.txt"
 UCA_EXTRA_TEMPLATE_DEFAULT   = "uca_config_base_extra.txt"
+VIDEO_TEMPLATE_DEFAULT       = "VIDEO template actualizado v2.txt"
 
 # --- Estado dinámico del mapeo POE ---
 POE_MEMBER_METADATA: Dict[int, Dict[str, object]] = {}
@@ -649,7 +654,7 @@ EQUIPO_RE = re.compile(r"^\s*Equipo:\s*([A-Za-z0-9\-\._/]+)", re.IGNORECASE)
 # Show interface status
 INT_STATUS_HEADER_RE = re.compile(r"^\s*Port\s+Name\s+Status\s+Vlan\s+Duplex", re.IGNORECASE)
 INT_STATUS_ROW_RE    = re.compile(
-    r"^\s*(?P<port>(?:Fa|Gi|Te)\d+(?:/\d+){0,2})\s+(?P<name>.*?)\s+"
+    r"^\s*(?P<port>(?:Fa|Gi|Te|Tw|Twe)\d+(?:/\d+){0,2})\s+(?P<name>.*?)\s+"
     r"(?P<status>connected|notconnect|disabled)\s+(?P<vlan>\S+)\s+",
     re.IGNORECASE
 )
@@ -675,6 +680,12 @@ IFACE_START_RE = re.compile(r"^\s*interface\s+(\S+)", re.IGNORECASE)
 VOICE_VLAN_RE  = re.compile(r"^\s*switchport\s+voice\s+vlan\s+(\d+)", re.IGNORECASE)
 TRUNK_ALLOWED_RE = re.compile(
     r"^\s*switchport\s+trunk\s+allowed\s+vlan\s+(?:add\s+)?(.+)$",
+    re.IGNORECASE,
+)
+
+IP_INT_BRIEF_ROW_RE = re.compile(
+    r"^\s*(?P<ifname>(?:Loopback\d+|(?:Fa|Gi|Te|Tw|Twe)\d+(?:/\d+){0,2}))\s+"
+    r"(?P<ip>\S+)\s+YES\s+\S+\s+(?P<status>\S+)\s+(?P<protocol>\S+)\s*$",
     re.IGNORECASE,
 )
 
@@ -887,6 +898,38 @@ def parse_last_io_information(lines: List[str]) -> Dict[str, Tuple[str, str, Opt
         if LINE_PROTOCOL_RE.search(raw) is None and raw.strip().startswith("!"):
             current_if = None
     return last_map
+
+
+def parse_video_interface_order(lines: List[str]) -> List[str]:
+    """Devuelve el orden natural de interfaces para equipos de vídeo."""
+    order: List[str] = []
+    in_status = False
+    saw_status = False
+
+    for ln in lines:
+        if INT_STATUS_HEADER_RE.search(ln):
+            in_status = True
+            saw_status = True
+            continue
+        if in_status:
+            if not ln.strip():
+                in_status = False
+                continue
+            m = INT_STATUS_ROW_RE.search(ln)
+            if m:
+                order.append(to_short_ifname(m.group("port").strip()))
+
+    if saw_status and order:
+        return order
+
+    for ln in lines:
+        m = IP_INT_BRIEF_ROW_RE.search(ln)
+        if not m:
+            continue
+        ifname = to_short_ifname(m.group("ifname"))
+        if ifname.lower().startswith(("gi", "fa", "te", "tw", "twe", "lo")):
+            order.append(ifname)
+    return order
 
 # ---------- Parser de logs ----------
 
@@ -1313,6 +1356,48 @@ def make_mapping_uca(uca_items):
 
     return rows
 
+
+def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tuple[str, str], List[str]]]:
+    rows: List[List[str]] = []
+    iface_cfgs: Dict[Tuple[str, str], List[str]] = {}
+
+    for fp in video_logs:
+        host, int_rows, _mac_map, _voice_map, iface_cfg_map, _last_io_map = parse_log(fp)
+
+        for if_short, block in iface_cfg_map.items():
+            iface_cfgs[(host, if_short)] = block[:]
+
+        with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+            lines = fh.readlines()
+        order = parse_video_interface_order(lines)
+        if not order:
+            order = sorted(iface_cfg_map.keys(), key=_stack_interface_sort_key)
+
+        name_by_port = {
+            to_short_ifname(row["port"]): row.get("name") or "N/A"
+            for row in int_rows
+        }
+
+        sw_name = NEW_SWITCH_VIDEO_NAME
+        for if_src in order:
+            desc = name_by_port.get(if_src, "N/A")
+            new_if = if_src  # se conserva el nombre original
+            rows.append([
+                host,
+                if_src,
+                desc,
+                new_if,
+                desc,
+                sw_name,
+                "ROUTED",
+                "l3",
+                "N/A",
+                "N/A",
+                "VIDEO",
+            ])
+
+    return rows, iface_cfgs
+
 def _extract_if_index(ifname: str) -> Optional[int]:
     m = re.search(r"(\d+)$", ifname)
     return int(m.group(1)) if m else None
@@ -1336,6 +1421,7 @@ def export_excel(all_rows, out_dir):
         ("POE", "POE"),
         ("AMBAR_T", "AMBAR_T"),
         ("UCA", "UCA"),
+        ("VIDEO", "VIDEO"),
     ]
 
     with pd.ExcelWriter(xlsx, engine="xlsxwriter") as w:
@@ -1344,6 +1430,7 @@ def export_excel(all_rows, out_dir):
         fmt_libre  = wb.add_format({'bg_color': '#FFF59D'})
         fmt_uca    = wb.add_format({'bg_color': '#CFE8FF'})
         fmt_amb_t  = wb.add_format({'bg_color': '#E6F4EA'})
+        fmt_video  = wb.add_format({'bg_color': '#FFF0F5'})
         vlan_col_format = wb.add_format({'num_format': '@'})
 
         for sheet_name, group_tag in sheet_defs:
@@ -1366,6 +1453,8 @@ def export_excel(all_rows, out_dir):
                     ws.set_row(row_idx, None, fmt_uca)
                 elif group_tag == "AMBAR_T":
                     ws.set_row(row_idx, None, fmt_amb_t)
+                elif group_tag == "VIDEO":
+                    ws.set_row(row_idx, None, fmt_video)
 
             col_index = subset.columns.get_loc("_Grupo")
             ws.set_column(col_index, col_index, None, None, {'hidden': True})
@@ -1397,6 +1486,7 @@ AMBAR_TEMPLATE_PATH       = pick_existing_path(AMBAR_TEMPLATE_DEFAULT)       or 
 UCA_TEMPLATE_PATH         = pick_existing_path(UCA_TEMPLATE_DEFAULT)         or UCA_TEMPLATE_DEFAULT
 AMBAR_EXTRA_TEMPLATE_PATH = pick_existing_path(AMBAR_EXTRA_TEMPLATE_DEFAULT) or AMBAR_EXTRA_TEMPLATE_DEFAULT
 UCA_EXTRA_TEMPLATE_PATH   = pick_existing_path(UCA_EXTRA_TEMPLATE_DEFAULT)   or UCA_EXTRA_TEMPLATE_DEFAULT
+VIDEO_TEMPLATE_PATH       = pick_existing_path(VIDEO_TEMPLATE_DEFAULT)       or VIDEO_TEMPLATE_DEFAULT
 
 def _read_template_file(path: str) -> List[str]:
     if not os.path.exists(path):
@@ -2001,9 +2091,15 @@ def _emit_base_template(
     if which in ("POE", "AMBAR_T"):
         base_lines = _read_template_file(AMBAR_TEMPLATE_PATH)
         base_name  = "AMBAR"
-    else:
+    elif which == "UCA":
         base_lines = _read_template_file(UCA_TEMPLATE_PATH)
         base_name  = "UCA"
+    elif which == "VIDEO":
+        base_lines = _read_template_file(VIDEO_TEMPLATE_PATH)
+        base_name  = "VIDEO"
+    else:
+        base_lines = []
+        base_name  = "GENERIC"
 
     f.write(f"!\n! === BASE TEMPLATE: {base_name} ===\n")
     f.write(f"hostname {forced_hostname}\n")
@@ -2208,6 +2304,56 @@ def export_config_with_templates(
 
     return txt
 
+
+def export_config_video(
+    rows: List[List[str]],
+    out_dir: str,
+    iface_cfgs: Dict[Tuple[str, str], List[str]],
+    *,
+    hostname_video: str,
+) -> str:
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    txt = os.path.join(out_dir, f"config_video_{ts}.txt")
+
+    rows_sorted = [r for r in rows if r[-1] == "VIDEO" and r[0] != "LIBRE"]
+
+    rows_by_switch: Dict[str, List[List[str]]] = {}
+    for row in rows_sorted:
+        rows_by_switch.setdefault(row[5], []).append(row)
+
+    for sw_rows in rows_by_switch.values():
+        sw_rows.sort(key=lambda r: _stack_interface_sort_key(r[3]))
+
+    with open(txt, "w", encoding="utf-8") as f:
+        f.write("!\n! Configuración generada (VIDEO)\n!\n")
+        _emit_base_template(f, forced_hostname=hostname_video, which="VIDEO")
+        f.write("! ------------------------------------------------------------\n")
+
+        if not rows_by_switch:
+            f.write("!\nend\n!\n")
+            return txt
+
+        for sw_new in sorted(rows_by_switch):
+            f.write(f"! Interfaces para {sw_new}\n")
+            for sw_act, if_act, desc_act, if_new, desc_new, _sw_name, _vlan, _mode, _tags, _mac, _grupo in rows_by_switch[sw_new]:
+                block = iface_cfgs.get((sw_act, if_act))
+                f.write(f"interface {if_new}\n")
+                if block:
+                    for ln in block:
+                        if re.match(r"^\s*interface\b", ln, re.IGNORECASE):
+                            continue
+                        f.write(ln if ln.endswith("\n") else ln + "\n")
+                else:
+                    f.write(f" ! running-config no encontrado para {sw_act} {if_act}\n")
+                    if desc_new and desc_new != "N/A":
+                        f.write(f" description {desc_new}\n")
+                f.write("!\n")
+
+        f.write("!\nend\n!\n")
+
+    return txt
+
+
 # ---------- Helpers de entrada (logs y CLI) ----------
 
 def sanitize_path(p: str) -> str:
@@ -2314,15 +2460,31 @@ if __name__ == "__main__":
         print("No se introdujeron ficheros. Saliendo.")
         raise SystemExit(0)
 
+    print("\nIntroduce, uno por línea, los nombres de los ficheros LOG de VIDEO (Enter en blanco para terminar):")
+    video_inputs: List[str] = []
+    while True:
+        raw = input("> ")
+        if not raw.strip():
+            break
+        name = sanitize_path(raw)
+        picked = pick_existing_log(name)
+        if not picked:
+            print(f"  - Aviso: '{raw}' no existe (probé variantes, 'shrunActual/' y '/mnt/data').")
+            print("    Vuelve a intentarlo o deja en blanco para terminar.")
+            continue
+        video_inputs.append(picked)
+
     wifi_items, voip_items, uca_items, ambar_other_items, trunk_items, all_iface_cfgs = build_inventory_from_logs(inputs)
 
     poe_rows, ambar_overflow = make_mapping_poe(wifi_items, voip_items, ambar_other_items, trunk_items)
     ambar_t_rows = make_mapping_ambar_t(ambar_overflow) if ambar_overflow else []
     uca_rows = make_mapping_uca(uca_items)
+    video_rows, video_iface_cfgs = make_mapping_video(video_inputs) if video_inputs else ([], {})
 
     print("\nIntroduce los hostnames base para las plantillas:")
     hostname_ambar = input("Hostname para switches AMBAR (POE y AMBAR_T): ").strip() or "AMBAR-SW"
     hostname_uca   = input("Hostname para switches UCA: ").strip() or "UCA-SW"
+    hostname_video = input("Hostname para switches VIDEO: ").strip() or "VIDEO-SW"
 
     _sort_group_rows(poe_rows)
     if ambar_t_rows:
@@ -2344,7 +2506,7 @@ if __name__ == "__main__":
         else:
             non_wifi_poe_rows.append(row)
 
-    all_rows = wifi_poe_rows + non_wifi_poe_rows + ambar_t_rows + uca_rows
+    all_rows = wifi_poe_rows + non_wifi_poe_rows + ambar_t_rows + uca_rows + video_rows
 
     out_dir = "Amigrar"
     os.makedirs(out_dir, exist_ok=True)
@@ -2366,6 +2528,12 @@ if __name__ == "__main__":
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
     ) if uca_rows else None
+    combined_cfgs = {**all_iface_cfgs, **video_iface_cfgs}
+    cfg_video = export_config_video(
+        all_rows, out_dir,
+        iface_cfgs=combined_cfgs,
+        hostname_video=hostname_video,
+    ) if video_rows else None
 
     print("\n¡Hecho!")
     print(f"  Excel: {os.path.abspath(xlsx_path)}")
@@ -2374,3 +2542,5 @@ if __name__ == "__main__":
         print(f"  Config AMBAR-T: {os.path.abspath(cfg_amb_t)}")
     if cfg_uca_t:
         print(f"  Config UCA-T:   {os.path.abspath(cfg_uca_t)}")
+    if cfg_video:
+        print(f"  Config VIDEO:   {os.path.abspath(cfg_video)}")
