@@ -1304,6 +1304,10 @@ def build_inventory_from_logs(filepaths: List[str]):
             }
             if forces_speed_10:
                 item["avoid_uxm"] = True
+                item["speed_10"] = True
+                item["origin"] = "AMBAR"
+                ambar_other_items.append(item)
+                continue
 
             if vlan in WIFI_VLANS:
                 item["origin"] = "WIFI"
@@ -1346,6 +1350,8 @@ def _mk_row(new_if_builder, idx_new, item, sw_name, group_tag):
         except ValueError:
             ordered = sorted(allowed_vlans)
         tags.append(f"VLANS={','.join(ordered)}")
+    if item.get("speed_10"):
+        tags.append("SPEED=10")
     origin = item.get("origin")
     if origin:
         tags.append(f"ORIGIN={origin}")
@@ -1531,7 +1537,6 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     avoid_sequence: List[Dict[str, Any]] = []
     avoid_sequence.extend(wifi_avoid)
     avoid_sequence.extend(voip_avoid)
-    avoid_sequence.extend(ambar_avoid)
     avoid_sequence.extend(trunk_avoid)
 
     sequence = []
@@ -1540,9 +1545,16 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     sequence.extend(("ITEM", it) for it in voip_primary)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
     sequence.extend(("ITEM", it) for it in ambar_primary)
+    forced_to_new_member = False
+    if ambar_avoid:
+        sequence.append(("FORCE_NEXT", None))
+        forced_to_new_member = True
+        sequence.extend(("ITEM", it) for it in ambar_avoid)
     sequence.extend(("ITEM", it) for it in trunk_primary)
     if avoid_sequence:
-        sequence.append(("FORCE_NEXT", None))
+        if not forced_to_new_member:
+            sequence.append(("FORCE_NEXT", None))
+            forced_to_new_member = True
         sequence.extend(("ITEM", it) for it in avoid_sequence)
     sequence.extend(("LIBRE", None) for _ in range(tail_free_effective))
 
@@ -2849,6 +2861,25 @@ def _emit_base_template(
     *,
     include_vlan_623: bool = False,
 ):
+    def _uca_vlan623_override(line: str) -> str:
+        stripped = line.strip()
+        lower = stripped.lower()
+        if not lower:
+            return line
+
+        overrides = {
+            "ip tftp source-interface vlan2230": "ip tftp source-interface Vlan623",
+            "ip http client source-interface vlan2230": "ip http client source-interface Vlan623",
+            "ntp source vlan2230": "ntp source Vlan623",
+        }
+
+        replacement = overrides.get(lower)
+        if not replacement:
+            return line
+
+        prefix_len = len(line) - len(line.lstrip())
+        return f"{line[:prefix_len]}{replacement}"
+
     if which in ("POE", "AMBAR_T"):
         base_lines = _read_template_file(AMBAR_TEMPLATE_PATH)
         base_name  = "AMBAR"
@@ -2893,7 +2924,12 @@ def _emit_base_template(
                         continue
                     if lower.startswith("name "):
                         continue
-                f.write(ln + ("\n" if not ln.endswith("\n") else ""))
+                out_line = (
+                    _uca_vlan623_override(ln)
+                    if include_vlan_623
+                    else ln
+                )
+                f.write(out_line + ("\n" if not out_line.endswith("\n") else ""))
 
 
 def _filter_out_sticky(lines: List[str]) -> List[str]:
@@ -3449,7 +3485,21 @@ def sanitize_path(p: str) -> str:
     if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
         p = p[1:-1]
     p = unicodedata.normalize("NFC", p)
-    return p.strip()
+    p = p.strip()
+
+    # Si se pega una ruta de Windows ("X:\\...") en un entorno POSIX, tradúcela a /mnt/x/...
+    if os.name != "nt":
+        m = re.match(r"^([A-Za-z]):[\\/](.*)$", p)
+        if m:
+            drive, rest = m.groups()
+            rest = rest.replace("\\", "/")
+            p = f"/mnt/{drive.lower()}/{rest}"
+        elif p.startswith("\\\\"):
+            # Normaliza rutas UNC (\\server\share -> //server/share)
+            p = "//" + p.lstrip("\\")
+            p = p.replace("\\", "/")
+
+    return p
 
 def pick_existing_log(name: str):
     def variants(base: str):
