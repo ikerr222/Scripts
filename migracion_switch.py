@@ -17,6 +17,7 @@ from typing import Iterable, List, Dict, Tuple, Optional, Callable, Union, Set, 
 
 import pandas as pd
 
+
 # --- Parámetros de switches destino (nombres internos para el mapeo) ---
 NEW_SWITCH_WIFI_NAME    = "SW-NUEVO-UXM-01"   # Miembro con WIFI (TwoGig/TenGig)
 NEW_SWITCH_POE_NAME     = "SW-NUEVO-POE-01"   # Miembros POE sin WIFI
@@ -42,6 +43,14 @@ UCA_VLANS  = {
     "2215", "2216", "2217", "2218", "2219", "2221", "2222", "2230", "2300"
 }
 IGNORED_VLANS = {"606"}
+# --- Marcado de VLANs en Excel ---
+#   - Rojo: 13,324,325,286,287,330,331
+#   - Amarillo: 168,169,171,175–187
+RED_VLANS = {"13", "324", "325", "286", "287", "330", "331"}
+YELLOW_VLANS = {
+    "168", "169", "171", "175", "176", "177", "178", "179", "180", "181",
+    "182", "183", "184", "185", "186", "187"
+}
 
 # --- Límites de actividad ---
 INACTIVITY_THRESHOLD_SECONDS = 13 * 7 * 24 * 3600  # 13 semanas
@@ -342,6 +351,7 @@ _VLAN_NAME_DATA = """
 296 AO-TetraBackup
 297 AO-CENTetra
 298 CIAS-JET2
+299 WIMAX
 300 WIFI-Servidores
 301 WIFI-LWAPP1
 302 WIFI-LWAPP2
@@ -1874,6 +1884,10 @@ def export_excel(all_rows, out_dir):
         fmt_header = wb.add_format({'bold': True})
         fmt_libre  = wb.add_format({'bg_color': '#FFF59D'})
         fmt_trunk  = wb.add_format({'bg_color': '#FFE0B2'})
+        # Formatos para override por VLAN
+        fmt_red = wb.add_format({'bg_color': '#FFCDD2'})  # rojo claro
+        fmt_yellow = wb.add_format({'bg_color': '#FFF9C4'})  # amarillo claro
+
         vlan_col_format = wb.add_format({'num_format': '@'})
         palette = ['#E3F2FD', '#FCE4EC', '#E8F5E9', '#FFF3E0', '#EDE7F6', '#F1F8E9', '#E0F7FA']
         color_format_cache: Dict[str, Any] = {}
@@ -1948,6 +1962,9 @@ def export_excel(all_rows, out_dir):
             sw_actual_list = sheet_df["SW Actual"].tolist()
             sw_new_list = sheet_df["SW Nuevo"].tolist()
             mode_list = sheet_df["Mode"].tolist()
+            # Lista de VLAN (string) para el override por VLAN
+            vlan_list = [str(v) if v is not None else "" for v in sheet_df["VLAN"].tolist()]
+
             unique_switches = list(dict.fromkeys(sw_new_list))
             switch_formats: Dict[str, Any] = {}
             for idx_sw, sw in enumerate(unique_switches):
@@ -1974,8 +1991,17 @@ def export_excel(all_rows, out_dir):
                         if fmt:
                             ws.set_row(row_idx, None, fmt)
 
+            # --- OVERRIDE por VLAN (aplica encima de lo anterior) ---
+            for row_idx in range(1, len(subset) + 1):
+                vlan_val = vlan_list[row_idx - 1]
+                if vlan_val in RED_VLANS:
+                    ws.set_row(row_idx, None, fmt_red)
+                elif vlan_val in YELLOW_VLANS:
+                    ws.set_row(row_idx, None, fmt_yellow)
+
             col_index = sheet_df.columns.get_loc("_Grupo")
             ws.set_column(col_index, col_index, None, None, {'hidden': True})
+
 
     return xlsx
 
