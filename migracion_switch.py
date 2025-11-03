@@ -1422,6 +1422,11 @@ def _poe_member_capacities(required_slots: int):
     return capacities
 
 def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
+    """
+    Cambios:
+      - Los AMBAR con speed 10 (avoid_uxm=True) se colocan justo después del bloque AMBAR normal,
+        antes de los TRUNK, y nunca en el miembro UXM (wifi).
+    """
     global POE_MEMBER_METADATA
     has_wifi = bool(wifi_items)
     has_voip = bool(voip_items)
@@ -1443,7 +1448,6 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         required_slots = min(len(ambar_others), max_stack_capacity)
 
     capacities = _poe_member_capacities(required_slots)
-
     if not capacities:
         POE_MEMBER_METADATA.clear()
         return [], ambar_others
@@ -1455,6 +1459,7 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         + reserve_after_voip
         + tail_free
         + len(trunk_items)
+        + len(ambar_others)  # importante: contamos TODO ambar (incluye speed10)
     )
 
     def _build_meta(caps: List[int]) -> Tuple[List[Dict[str, Any]], int]:
@@ -1463,196 +1468,152 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         for member_index, capacity in enumerate(caps, start=1):
             member_type = "wifi" if has_wifi and member_index == 1 else "poe"
             usable = max(capacity - 2, 0)
-            meta.append(
-                {
-                    "index": member_index,
-                    "capacity": capacity,
-                    "type": member_type,
-                    "usable": usable,
-                }
-            )
+            meta.append({"index": member_index, "capacity": capacity, "type": member_type, "usable": usable})
             total += usable
         return meta, total
 
-    def _append_capacity(remaining_needed: int) -> bool:
-        if len(capacities) >= POE_MAX_STACK_MEMBERS:
-            return False
-        next_index = len(capacities) + 1
-        if next_index < POE_MAX_STACK_MEMBERS:
-            capacities.append(POE_MAX_PORTS)
-            return True
-        usable_aux = max(POE_AUX_FINAL_PORTS - 2, 0)
-        next_capacity = POE_MAX_PORTS if remaining_needed > usable_aux else POE_AUX_FINAL_PORTS
-        capacities.append(next_capacity)
-        return True
+    meta_info, total_usable = _build_meta(capacities)
 
-    while True:
+    while len(capacities) < POE_MAX_STACK_MEMBERS:
+        usable_for_ambar = max(total_usable - (base_fixed - len(ambar_others)), 0)
+        if usable_for_ambar >= len(ambar_others):
+            break
+        remaining_needed = len(ambar_others) - usable_for_ambar
+        if remaining_needed <= 0:
+            break
+        next_capacity = (
+            POE_MAX_PORTS
+            if (len(capacities) + 1) < POE_MAX_STACK_MEMBERS or remaining_needed > POE_AUX_FINAL_PORTS
+            else POE_AUX_FINAL_PORTS
+        )
+        capacities.append(next_capacity)
         meta_info, total_usable = _build_meta(capacities)
 
-        usable_for_ambar_probe = max(total_usable - base_fixed, 0)
-        if usable_for_ambar_probe < len(ambar_others):
-            remaining_needed = len(ambar_others) - usable_for_ambar_probe
-            if remaining_needed > 0 and _append_capacity(remaining_needed):
-                continue
-            if remaining_needed > 0:
-                raise RuntimeError("Capacidad POE insuficiente para AMBAR configurados")
+    # Construye metadata y nombres de miembros
+    POE_MEMBER_METADATA.clear()
+    wifi_counter = 0
+    poe_counter = 0
+    for info in meta_info:
+        member_index = info["index"]
+        capacity = info["capacity"]
+        if info["type"] == "wifi":
+            wifi_counter += 1
+            sw_name = _format_numbered_name(NEW_SWITCH_WIFI_NAME, wifi_counter)
+        else:
+            poe_counter += 1
+            sw_name = _format_numbered_name(NEW_SWITCH_POE_NAME, poe_counter)
+        POE_MEMBER_METADATA[member_index] = {
+            "type": info["type"],
+            "sw_name": sw_name,
+            "capacity": capacity,
+            "usable_capacity": max(capacity - 2, 0),
+        }
 
-        if base_fixed > total_usable:
-            shortfall = base_fixed - total_usable
-            if _append_capacity(shortfall):
-                continue
-            raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP configurados")
+    total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
+    if base_fixed > total_usable:
+        raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP/AMBAR/TRUNK configurados")
 
-        POE_MEMBER_METADATA.clear()
-        wifi_counter = 0
-        poe_counter = 0
-        for info in meta_info:
-            member_index = info["index"]
-            capacity = info["capacity"]
-            if info["type"] == "wifi":
-                wifi_counter += 1
-                sw_name = _format_numbered_name(NEW_SWITCH_WIFI_NAME, wifi_counter)
-            else:
-                poe_counter += 1
-                sw_name = _format_numbered_name(NEW_SWITCH_POE_NAME, poe_counter)
-            POE_MEMBER_METADATA[member_index] = {
-                "type": info["type"],
-                "sw_name": sw_name,
-                "capacity": capacity,
-                "usable_capacity": max(capacity - 2, 0),
-            }
+    # Particiones y orden
+    wifi_primary = [it for it in wifi_items if not it.get("avoid_uxm")]
+    wifi_avoid   = [it for it in wifi_items if it.get("avoid_uxm")]
+    voip_primary = [it for it in voip_items if not it.get("avoid_uxm")]
+    voip_avoid   = [it for it in voip_items if it.get("avoid_uxm")]
 
-        total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
-        tail_free_effective = tail_free if tail_free > 0 else 0
-        usable_for_ambar = max(total_usable - base_fixed, 0)
-        ambar_for_poe = ambar_others[:usable_for_ambar]
-        ambar_overflow = ambar_others[usable_for_ambar:]
+    # AMBAR que caben en POE
+    usable_for_ambar = max(total_usable - (
+        len(wifi_primary) + reserve_after_wifi + len(voip_primary) + reserve_after_voip + tail_free + len(trunk_items)
+    ), 0)
+    ambar_for_poe = ambar_others[:usable_for_ambar]
+    ambar_overflow = ambar_others[usable_for_ambar:]
 
-        wifi_primary = [it for it in wifi_items if not it.get("avoid_uxm")]
-        wifi_avoid = [it for it in wifi_items if it.get("avoid_uxm")]
-        voip_primary = [it for it in voip_items if not it.get("avoid_uxm")]
-        voip_avoid = [it for it in voip_items if it.get("avoid_uxm")]
-        ambar_primary: List[Dict[str, Any]] = []
-        ambar_avoid: List[Dict[str, Any]] = []
-        for it in ambar_for_poe:
-            if it.get("avoid_uxm"):
-                ambar_avoid.append(it)
-            else:
-                ambar_primary.append(it)
+    ambar_primary: List[Dict[str, Any]] = []
+    ambar_slow:    List[Dict[str, Any]] = []  # <-- speed 10
+    for it in ambar_for_poe:
+        (ambar_slow if it.get("avoid_uxm") else ambar_primary).append(it)
 
-        trunk_primary = [it for it in trunk_items if not it.get("avoid_uxm")]
-        trunk_avoid = [it for it in trunk_items if it.get("avoid_uxm")]
+    trunk_primary = [it for it in trunk_items if not it.get("avoid_uxm")]
+    trunk_avoid   = [it for it in trunk_items if it.get("avoid_uxm")]
 
-        avoid_sequence: List[Dict[str, Any]] = []
-        avoid_sequence.extend(wifi_avoid)
-        avoid_sequence.extend(voip_avoid)
-        avoid_sequence.extend(trunk_avoid)
+    # Los avoid restantes (NO speed10 de AMBAR, porque ya van como AMBAR_SLOW antes de trunks)
+    avoid_sequence: List[Dict[str, Any]] = []
+    avoid_sequence.extend(wifi_avoid)
+    avoid_sequence.extend(voip_avoid)
+    avoid_sequence.extend(trunk_avoid)
 
-        forced_transitions = 1 if ambar_avoid else 0
-        if avoid_sequence and not ambar_avoid:
-            forced_transitions += 1
-        required_members = 1 + forced_transitions
-        if required_members > len(capacities):
-            extra_members = required_members - len(capacities)
-            appended_any = False
-            for _ in range(extra_members):
-                appended_any = _append_capacity(1)
-                if not appended_any:
-                    break
-            if appended_any:
-                continue
-            raise RuntimeError(
-                "Capacidad POE insuficiente para respetar las restricciones de ubicación"
-            )
+    # Secuencia final
+    sequence: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+    sequence.extend(("ITEM", it) for it in wifi_primary)
+    sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
+    sequence.extend(("ITEM", it) for it in voip_primary)
+    sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
+    sequence.extend(("ITEM", it) for it in ambar_primary)
+    sequence.extend(("AMBAR_SLOW", it) for it in ambar_slow)   # <-- aquí: antes de TRUNK
+    sequence.extend(("ITEM", it) for it in trunk_primary)
+    if avoid_sequence:
+        sequence.append(("FORCE_NEXT", None))
+        sequence.extend(("ITEM", it) for it in avoid_sequence)
+    sequence.extend(("LIBRE", None) for _ in range(tail_free))
 
-        sequence = []
-        sequence.extend(("ITEM", it) for it in wifi_primary)
-        sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
-        sequence.extend(("ITEM", it) for it in voip_primary)
-        sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
-        sequence.extend(("ITEM", it) for it in ambar_primary)
-        forced_to_new_member = False
-        if ambar_avoid:
-            sequence.append(("FORCE_NEXT", None))
-            forced_to_new_member = True
-            sequence.extend(("ITEM", it) for it in ambar_avoid)
-        sequence.extend(("ITEM", it) for it in trunk_primary)
-        if avoid_sequence:
-            if not forced_to_new_member:
-                sequence.append(("FORCE_NEXT", None))
-                forced_to_new_member = True
-            sequence.extend(("ITEM", it) for it in avoid_sequence)
-        sequence.extend(("LIBRE", None) for _ in range(tail_free_effective))
+    # Emisión de filas a miembros/puertos
+    rows: List[List[str]] = []
+    member_index = 1
+    member_info = POE_MEMBER_METADATA[member_index]
+    usable_capacity = int(member_info["usable_capacity"])
+    total_ports = int(member_info["capacity"])
+    formatter = _poe_interface_formatter(member_index)
+    sw_name = str(member_info["sw_name"])
+    idx = 1
 
-        def _try_build_rows() -> Optional[List[List[str]]]:
-            rows: List[List[str]] = []
-            member_index = 1
-            member_info = POE_MEMBER_METADATA[member_index]
-            usable_capacity = int(member_info["usable_capacity"])
-            total_ports = int(member_info["capacity"])
-            formatter = _poe_interface_formatter(member_index)
-            sw_name = str(member_info["sw_name"])
-            idx = 1
+    def flush_current(start_idx: int) -> None:
+        if usable_capacity > 0 and start_idx <= usable_capacity:
+            _pad_member_with_libres(rows, formatter, sw_name, start_idx, usable_capacity, "POE")
+        _pad_member_with_libres(rows, formatter, sw_name, usable_capacity + 1, total_ports, "POE")
 
-            def flush_current(start_idx: int) -> None:
-                if usable_capacity > 0 and start_idx <= usable_capacity:
-                    _pad_member_with_libres(
-                        rows, formatter, sw_name, start_idx, usable_capacity, "POE"
-                    )
-                _pad_member_with_libres(
-                    rows, formatter, sw_name, usable_capacity + 1, total_ports, "POE"
-                )
-
-            for kind, payload in sequence:
-                if kind == "FORCE_NEXT":
-                    flush_current(idx)
-                    member_index += 1
-                    if member_index > len(capacities):
-                        return None
-                    member_info = POE_MEMBER_METADATA[member_index]
-                    usable_capacity = int(member_info["usable_capacity"])
-                    total_ports = int(member_info["capacity"])
-                    formatter = _poe_interface_formatter(member_index)
-                    sw_name = str(member_info["sw_name"])
-                    idx = 1
-                    continue
-                while usable_capacity <= 0 or idx > usable_capacity:
-                    flush_current(idx)
-                    member_index += 1
-                    if member_index > len(capacities):
-                        return None
-                    member_info = POE_MEMBER_METADATA[member_index]
-                    usable_capacity = int(member_info["usable_capacity"])
-                    total_ports = int(member_info["capacity"])
-                    formatter = _poe_interface_formatter(member_index)
-                    sw_name = str(member_info["sw_name"])
-                    idx = 1
-
-                if kind == "ITEM":
-                    rows.append(_mk_row(formatter, idx, payload, sw_name, "POE"))
-                else:
-                    rows.append(_libre_row(formatter, idx, sw_name, "POE"))
-                idx += 1
-
-            flush_current(idx)
-            while member_index < len(capacities):
-                member_index += 1
-                member_info = POE_MEMBER_METADATA[member_index]
-                usable_capacity = int(member_info["usable_capacity"])
-                total_ports = int(member_info["capacity"])
-                formatter = _poe_interface_formatter(member_index)
-                sw_name = str(member_info["sw_name"])
-                flush_current(1)
-
-            return rows
-
-        built_rows = _try_build_rows()
-        if built_rows is None:
-            if _append_capacity(1):
-                continue
+    def goto_next_member():
+        nonlocal member_index, member_info, usable_capacity, total_ports, formatter, sw_name, idx
+        flush_current(idx)
+        member_index += 1
+        if member_index > len(capacities):
             raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
+        member_info = POE_MEMBER_METADATA[member_index]
+        usable_capacity = int(member_info["usable_capacity"])
+        total_ports = int(member_info["capacity"])
+        formatter = _poe_interface_formatter(member_index)
+        sw_name = str(member_info["sw_name"])
+        idx = 1
 
-        return built_rows, ambar_overflow
+    for kind, payload in sequence:
+        if kind == "FORCE_NEXT":
+            goto_next_member()
+            continue
+
+        # Si estamos fuera de capacidad útil, saltamos de miembro
+        while usable_capacity <= 0 or idx > usable_capacity:
+            goto_next_member()
+
+        if kind == "AMBAR_SLOW":
+            # Política: NUNCA en UXM (miembro wifi)
+            if member_info.get("type") == "wifi":
+                goto_next_member()
+                # puede haber más de un miembro wifi? aquí solo el 1º; rechecamos por si acaso
+                if member_info.get("type") == "wifi":
+                    goto_next_member()
+            rows.append(_mk_row(formatter, idx, payload, sw_name, "POE"))
+            idx += 1
+            continue
+
+        if kind == "ITEM":
+            rows.append(_mk_row(formatter, idx, payload, sw_name, "POE"))
+        else:  # LIBRE
+            rows.append(_libre_row(formatter, idx, sw_name, "POE"))
+        idx += 1
+
+    flush_current(idx)
+    while member_index < len(capacities):
+        goto_next_member()
+        flush_current(1)
+
+    return rows, ambar_overflow
 
 def _ambar_t_switch_capacities(required_ports: int) -> List[int]:
     capacities: List[int] = []
