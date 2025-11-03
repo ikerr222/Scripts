@@ -1304,6 +1304,10 @@ def build_inventory_from_logs(filepaths: List[str]):
             }
             if forces_speed_10:
                 item["avoid_uxm"] = True
+                item["speed_10"] = True
+                item["origin"] = "AMBAR"
+                ambar_other_items.append(item)
+                continue
 
             if vlan in WIFI_VLANS:
                 item["origin"] = "WIFI"
@@ -1346,6 +1350,8 @@ def _mk_row(new_if_builder, idx_new, item, sw_name, group_tag):
         except ValueError:
             ordered = sorted(allowed_vlans)
         tags.append(f"VLANS={','.join(ordered)}")
+    if item.get("speed_10"):
+        tags.append("SPEED=10")
     origin = item.get("origin")
     if origin:
         tags.append(f"ORIGIN={origin}")
@@ -1531,7 +1537,6 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     avoid_sequence: List[Dict[str, Any]] = []
     avoid_sequence.extend(wifi_avoid)
     avoid_sequence.extend(voip_avoid)
-    avoid_sequence.extend(ambar_avoid)
     avoid_sequence.extend(trunk_avoid)
 
     sequence = []
@@ -1540,6 +1545,9 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     sequence.extend(("ITEM", it) for it in voip_primary)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
     sequence.extend(("ITEM", it) for it in ambar_primary)
+    if ambar_avoid:
+        sequence.append(("FORCE_NEXT", None))
+        sequence.extend(("ITEM", it) for it in ambar_avoid)
     sequence.extend(("ITEM", it) for it in trunk_primary)
     if avoid_sequence:
         sequence.append(("FORCE_NEXT", None))
@@ -3449,7 +3457,21 @@ def sanitize_path(p: str) -> str:
     if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
         p = p[1:-1]
     p = unicodedata.normalize("NFC", p)
-    return p.strip()
+    p = p.strip()
+
+    # Si se pega una ruta de Windows ("X:\\...") en un entorno POSIX, tradúcela a /mnt/x/...
+    if os.name != "nt":
+        m = re.match(r"^([A-Za-z]):[\\/](.*)$", p)
+        if m:
+            drive, rest = m.groups()
+            rest = rest.replace("\\", "/")
+            p = f"/mnt/{drive.lower()}/{rest}"
+        elif p.startswith("\\\\"):
+            # Normaliza rutas UNC (\\server\share -> //server/share)
+            p = "//" + p.lstrip("\\")
+            p = p.replace("\\", "/")
+
+    return p
 
 def pick_existing_log(name: str):
     def variants(base: str):
