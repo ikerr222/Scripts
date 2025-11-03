@@ -657,7 +657,8 @@ EQUIPO_RE = re.compile(r"^\s*Equipo:\s*([A-Za-z0-9\-\._/]+)", re.IGNORECASE)
 INT_STATUS_HEADER_RE = re.compile(r"^\s*Port\s+Name\s+Status\s+Vlan\s+Duplex", re.IGNORECASE)
 INT_STATUS_ROW_RE    = re.compile(
     r"^\s*(?P<port>(?:Fa|Gi|Te|Tw|Twe)\d+(?:/\d+){0,2})\s+(?P<name>.*?)\s+"
-    r"(?P<status>connected|notconnect|disabled)\s+(?P<vlan>\S+)\s+",
+    r"(?P<status>connected|notconnect|disabled)\s+(?P<vlan>\S+)\s+"
+    r"(?P<duplex>\S+)\s+(?P<speed>\S+)(?:\s+(?P<type>.+?))?\s*$",
     re.IGNORECASE
 )
 
@@ -734,6 +735,25 @@ def _resolve_new_interface(builder: Union[Callable[[int], str], str], idx: int) 
     if callable(builder):
         return builder(idx)
     return f"{builder}{idx}"
+
+def _is_speed_10(speed: Optional[str]) -> bool:
+    if not speed:
+        return False
+    s = speed.strip().lower()
+    if not s:
+        return False
+    if "g" in s:
+        return False
+    if s.startswith("a-"):
+        s = s[2:]
+    match = re.search(r"\d+", s)
+    if not match:
+        return False
+    try:
+        value = int(match.group(0))
+    except ValueError:
+        return False
+    return value == 10
 
 # ---------- Parseos de running-config ----------
 
@@ -969,7 +989,10 @@ def parse_log(filepath: str):
                     "port":   m.group("port").strip(),
                     "name":   m.group("name").strip(),
                     "status": m.group("status").lower(),
-                    "vlan":   m.group("vlan").strip()
+                    "vlan":   m.group("vlan").strip(),
+                    "duplex": m.group("duplex").strip(),
+                    "speed":  m.group("speed").strip(),
+                    "type":   (m.group("type") or "").strip(),
                 })
 
     # mac address-table
@@ -1074,6 +1097,7 @@ def build_inventory_from_logs(filepaths: List[str]):
                 # Formatos raros no numéricos -> descartar
                 continue
 
+            speed = r.get("speed")
             item = {
                 "src_host": host,
                 "src_port": port_short,
@@ -1081,11 +1105,17 @@ def build_inventory_from_logs(filepaths: List[str]):
                 "vlan": vlan,
                 "macs": mac_map.get(port_short, []),
                 "voice_vlan": voice_vlan,
-                "mode": "access"
+                "mode": "access",
+                "speed": speed,
             }
 
+            is_speed_10 = _is_speed_10(speed)
             if vlan in WIFI_VLANS:
-                wifi_items.append(item)
+                if is_speed_10:
+                    item["force_non_wifi_member"] = True
+                    ambar_other_items.append(item)
+                else:
+                    wifi_items.append(item)
             elif voice_vlan and voice_vlan in VOIP_VLANS:
                 voip_items.append(item)
             elif vlan in UCA_VLANS:
@@ -1121,6 +1151,13 @@ def _mk_row(new_if_builder, idx_new, item, sw_name, group_tag):
         except ValueError:
             ordered = sorted(allowed_vlans)
         tags.append(f"VLANS={','.join(ordered)}")
+    speed = item.get("speed")
+    if speed:
+        speed_clean = str(speed).strip()
+        if speed_clean:
+            tags.append(f"SPEED={speed_clean}")
+    if item.get("force_non_wifi_member"):
+        tags.append("FORCE_NON_UXM")
     tag_str = ";".join(tags) if tags else "N/A"
     return [
         item["src_host"],           # SW Actual
@@ -1189,6 +1226,12 @@ def _poe_member_capacities(required_slots: int):
 
 def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     global POE_MEMBER_METADATA
+    wifi_items = list(wifi_items)
+    ambar_others = list(ambar_others)
+    forced_wifi = [item for item in wifi_items if item.get("force_non_wifi_member")]
+    if forced_wifi:
+        wifi_items = [item for item in wifi_items if not item.get("force_non_wifi_member")]
+        ambar_others = forced_wifi + ambar_others
     has_wifi = bool(wifi_items)
     has_voip = bool(voip_items)
     reserve_after_wifi = RESERVED_AFTER_WIFI if has_wifi else 0
