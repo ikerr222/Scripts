@@ -1444,7 +1444,7 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     reserve_after_voip = RESERVED_AFTER_VOIP if has_voip else 0
     tail_free = RESERVED_TAIL_FREE if (has_wifi or has_voip) else 0
 
-    base_slots = (
+    core_slots = (
         len(wifi_items)
         + reserve_after_wifi
         + len(voip_items)
@@ -1452,7 +1452,7 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         + len(trunk_items)
         + tail_free
     )
-    required_slots = base_slots
+    required_slots = core_slots
     if required_slots == 0 and ambar_others:
         max_stack_capacity = POE_MAX_PORTS * POE_MAX_STACK_MEMBERS
         required_slots = min(len(ambar_others), max_stack_capacity)
@@ -1461,16 +1461,6 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     if not capacities:
         POE_MEMBER_METADATA.clear()
         return [], ambar_others
-
-    base_fixed = (
-        len(wifi_items)
-        + reserve_after_wifi
-        + len(voip_items)
-        + reserve_after_voip
-        + tail_free
-        + len(trunk_items)
-        + len(ambar_others)  # importante: contamos TODO ambar (incluye speed10)
-    )
 
     def _build_meta(caps: List[int]) -> Tuple[List[Dict[str, Any]], int]:
         meta: List[Dict[str, Any]] = []
@@ -1485,7 +1475,7 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     meta_info, total_usable = _build_meta(capacities)
 
     while len(capacities) < POE_MAX_STACK_MEMBERS:
-        usable_for_ambar = max(total_usable - (base_fixed - len(ambar_others)), 0)
+        usable_for_ambar = max(total_usable - core_slots, 0)
         if usable_for_ambar >= len(ambar_others):
             break
         remaining_needed = len(ambar_others) - usable_for_ambar
@@ -1520,7 +1510,7 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         }
 
     total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
-    if base_fixed > total_usable:
+    if core_slots > total_usable:
         raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP/AMBAR/TRUNK configurados")
 
     # Particiones y orden
@@ -1530,11 +1520,9 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     voip_avoid   = [it for it in voip_items if it.get("avoid_uxm")]
 
     # AMBAR que caben en POE
-    usable_for_ambar = max(total_usable - (
-        len(wifi_primary) + reserve_after_wifi + len(voip_primary) + reserve_after_voip + tail_free + len(trunk_items)
-    ), 0)
-    ambar_for_poe = ambar_others[:usable_for_ambar]
-    ambar_overflow = ambar_others[usable_for_ambar:]
+    ambar_capacity = max(total_usable - core_slots, 0)
+    ambar_for_poe = ambar_others[:ambar_capacity]
+    ambar_overflow = ambar_others[ambar_capacity:]
 
     ambar_primary: List[Dict[str, Any]] = []
     ambar_slow:    List[Dict[str, Any]] = []  # <-- speed 10
@@ -1882,7 +1870,7 @@ def export_excel(all_rows, out_dir):
     with pd.ExcelWriter(xlsx, engine="xlsxwriter") as w:
         wb = w.book
         fmt_header = wb.add_format({'bold': True})
-        fmt_libre  = wb.add_format({'bg_color': '#FFF59D'})
+        fmt_libre  = wb.add_format({'bg_color': '#C8E6C9'})
         fmt_trunk  = wb.add_format({'bg_color': '#FFE0B2'})
         # Formatos para override por VLAN
         fmt_red = wb.add_format({'bg_color': '#FFCDD2'})  # rojo claro
@@ -3687,7 +3675,7 @@ if __name__ == "__main__":
 
     all_rows = wifi_poe_rows + non_wifi_poe_rows + ambar_t_rows + uca_rows + video_rows
 
-    out_dir = "Amigrar"
+    out_dir = r"X:\\AENA\\Postventa\\2024\\OP046517 Renovacion Acceso AO Barcelona\\3 Documentación\\33 TIC\\Migraciones\\SalidaScript"
     os.makedirs(out_dir, exist_ok=True)
 
     xlsx_path = export_excel(all_rows, out_dir)
