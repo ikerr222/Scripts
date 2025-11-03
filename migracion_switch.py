@@ -1302,12 +1302,10 @@ def build_inventory_from_logs(filepaths: List[str]):
                 "voice_vlan": voice_tag,
                 "mode": "access",
             }
+            if forces_speed_10:
+                item["avoid_uxm"] = True
 
             if vlan in WIFI_VLANS:
-                if forces_speed_10:
-                    item["origin"] = "AMBAR"
-                    ambar_other_items.append(item)
-                    continue
                 item["origin"] = "WIFI"
                 wifi_items.append(item)
             elif voice_vlan or vlan in VOIP_VLANS:
@@ -1515,13 +1513,37 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     ambar_for_poe = ambar_others[:usable_for_ambar]
     ambar_overflow = ambar_others[usable_for_ambar:]
 
+    wifi_primary = [it for it in wifi_items if not it.get("avoid_uxm")]
+    wifi_avoid = [it for it in wifi_items if it.get("avoid_uxm")]
+    voip_primary = [it for it in voip_items if not it.get("avoid_uxm")]
+    voip_avoid = [it for it in voip_items if it.get("avoid_uxm")]
+    ambar_primary: List[Dict[str, Any]] = []
+    ambar_avoid: List[Dict[str, Any]] = []
+    for it in ambar_for_poe:
+        if it.get("avoid_uxm"):
+            ambar_avoid.append(it)
+        else:
+            ambar_primary.append(it)
+
+    trunk_primary = [it for it in trunk_items if not it.get("avoid_uxm")]
+    trunk_avoid = [it for it in trunk_items if it.get("avoid_uxm")]
+
+    avoid_sequence: List[Dict[str, Any]] = []
+    avoid_sequence.extend(wifi_avoid)
+    avoid_sequence.extend(voip_avoid)
+    avoid_sequence.extend(ambar_avoid)
+    avoid_sequence.extend(trunk_avoid)
+
     sequence = []
-    sequence.extend(("ITEM", it) for it in wifi_items)
+    sequence.extend(("ITEM", it) for it in wifi_primary)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
-    sequence.extend(("ITEM", it) for it in voip_items)
+    sequence.extend(("ITEM", it) for it in voip_primary)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
-    sequence.extend(("ITEM", it) for it in ambar_for_poe)
-    sequence.extend(("ITEM", it) for it in trunk_items)
+    sequence.extend(("ITEM", it) for it in ambar_primary)
+    sequence.extend(("ITEM", it) for it in trunk_primary)
+    if avoid_sequence:
+        sequence.append(("FORCE_NEXT", None))
+        sequence.extend(("ITEM", it) for it in avoid_sequence)
     sequence.extend(("LIBRE", None) for _ in range(tail_free_effective))
 
     rows: List[List[str]] = []
@@ -1539,6 +1561,18 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         _pad_member_with_libres(rows, formatter, sw_name, usable_capacity + 1, total_ports, "POE")
 
     for kind, payload in sequence:
+        if kind == "FORCE_NEXT":
+            flush_current(idx)
+            member_index += 1
+            if member_index > len(capacities):
+                raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
+            member_info = POE_MEMBER_METADATA[member_index]
+            usable_capacity = int(member_info["usable_capacity"])
+            total_ports = int(member_info["capacity"])
+            formatter = _poe_interface_formatter(member_index)
+            sw_name = str(member_info["sw_name"])
+            idx = 1
+            continue
         while usable_capacity <= 0 or idx > usable_capacity:
             flush_current(idx)
             member_index += 1
