@@ -30,6 +30,9 @@ NEW_IF_UCA_T_PREFIX     = "GigabitEthernet1/0/"
 NEW_SWITCH_VIDEO_NAME   = "SW-NUEVO-VIDEO-01"
 NEW_IF_VIDEO_PREFIX     = "GigabitEthernet1/0/"
 
+# --- Valores por defecto ---
+DEFAULT_SNMP_CONTACT = "dmanau@aena.es"
+
 # --- Conjuntos de VLAN objetivo ---
 WIFI_VLANS = {"360", "361"}
 VOIP_VLANS = {"1211", "1223", "1225", "1226", "1227", "1228", "1229"}
@@ -624,16 +627,21 @@ for _raw in _VLAN_NAME_DATA.strip().splitlines():
     if vlan_name:
         VLAN_NAME_MAP[vlan_id] = vlan_name
 
+VLAN_NAME_MAP.setdefault("623", "BCN_ACC_GESTION_AMBAR")
+
 # --- Capacidad y reservas del switch POE ---
 POE_MAX_PORTS          = 48
 RESERVED_AFTER_WIFI    = 4
+RESERVED_AFTER_VOIP    = 10
 RESERVED_TAIL_FREE     = 10
 POE_AUX_FINAL_PORTS    = 24   # último miembro de 24 si faltan <= 24
 POE_MAX_STACK_MEMBERS  = 3    # WIFI + POE + AMBAR (máximo)
 WIFI_TWOGIG_LIMIT      = 36
 
 # --- Capacidad de switches adicionales ---
-AMBAR_T_MAX_PORTS = 48
+AMBAR_T_DEFAULT_PORTS = 24
+AMBAR_T_LARGE_PORTS   = 48
+AMBAR_T_RESERVED_TAIL = 10
 UCA_DEFAULT_PORTS = 24
 UCA_LARGE_PORTS   = 48
 UCA_RESERVED_TAIL_FREE = 3
@@ -643,8 +651,6 @@ AMBAR_TEMPLATE_DEFAULT       = "AMBAR template actualizado v3.txt"
 UCA_TEMPLATE_DEFAULT         = "UCA template actualizado v2.txt"
 AMBAR_EXTRA_TEMPLATE_DEFAULT = "ambar_config_base_extra.txt"
 UCA_EXTRA_TEMPLATE_DEFAULT   = "uca_config_base_extra.txt"
-VIDEO_TEMPLATE_DEFAULT       = "VIDEO template actualizado v2.txt"
-VIDEO_EXTRA_TEMPLATE_DEFAULT = "video_config_base_extra.txt"
 
 # --- Estado dinámico del mapeo POE ---
 POE_MEMBER_METADATA: Dict[int, Dict[str, object]] = {}
@@ -657,8 +663,7 @@ EQUIPO_RE = re.compile(r"^\s*Equipo:\s*([A-Za-z0-9\-\._/]+)", re.IGNORECASE)
 INT_STATUS_HEADER_RE = re.compile(r"^\s*Port\s+Name\s+Status\s+Vlan\s+Duplex", re.IGNORECASE)
 INT_STATUS_ROW_RE    = re.compile(
     r"^\s*(?P<port>(?:Fa|Gi|Te|Tw|Twe)\d+(?:/\d+){0,2})\s+(?P<name>.*?)\s+"
-    r"(?P<status>connected|notconnect|disabled)\s+(?P<vlan>\S+)\s+"
-    r"(?P<duplex>\S+)\s+(?P<speed>\S+)(?:\s+(?P<type>.+?))?\s*$",
+    r"(?P<status>connected|notconnect|disabled)\s+(?P<vlan>\S+)\s+",
     re.IGNORECASE
 )
 
@@ -668,6 +673,8 @@ MAC_ROW_RE    = re.compile(
     r"^\s*(?P<vlan>\S+)\s+(?P<mac>[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})\s+"
     r"(?P<type>STATIC|DYNAMIC)\s+(?P<port>.+?)\s*$", re.IGNORECASE
 )
+
+TIMESTAMP_PREFIX_RE = re.compile(r"^\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?\[\d{2}:\d{2}:\d{2}\]")
 
 LINE_PROTOCOL_RE = re.compile(
     r"^\s*(?P<ifname>\S+)\s+is\s+\S+,\s+line\s+protocol\s+is\s+\S+",
@@ -681,10 +688,22 @@ LAST_IO_RE = re.compile(
 # show running-config (interfaces)
 IFACE_START_RE = re.compile(r"^\s*interface\s+(\S+)", re.IGNORECASE)
 VOICE_VLAN_RE  = re.compile(r"^\s*switchport\s+voice\s+vlan\s+(\d+)", re.IGNORECASE)
+
+SNMP_LOCATION_RE         = re.compile(r"^\s*snmp-server\s+location\s+(.+)$", re.IGNORECASE)
+SNMP_CONTACT_RE          = re.compile(r"^\s*snmp-server\s+contact\s+(.+)$", re.IGNORECASE)
+IP_DEFAULT_GATEWAY_RE    = re.compile(r"^\s*ip\s+default-gateway\s+(\S+)", re.IGNORECASE)
+IP_PIM_REGISTER_RE       = re.compile(r"^\s*ip\s+pim\s+register-source\s+(\S+)", re.IGNORECASE)
+IP_PIM_RP_RE             = re.compile(r"^\s*ip\s+pim\s+rp-address\s+.+$", re.IGNORECASE)
+IP_TFTP_SOURCE_RE        = re.compile(r"^\s*ip\s+tftp\s+source-interface\s+(\S+)", re.IGNORECASE)
+IP_HTTP_CLIENT_SOURCE_RE = re.compile(r"^\s*ip\s+http\s+client\s+source-interface\s+(\S+)", re.IGNORECASE)
+SNMP_SOURCE_IF_RE        = re.compile(r"^\s*snmp-server\s+source-interface\s+traps\s+(\S+)", re.IGNORECASE)
+NTP_SOURCE_RE            = re.compile(r"^\s*ntp\s+source\s+(\S+)", re.IGNORECASE)
+IP_NAME_SERVER_RE        = re.compile(r"^\s*ip\s+name-server\s+(\S+)", re.IGNORECASE)
 TRUNK_ALLOWED_RE = re.compile(
     r"^\s*switchport\s+trunk\s+allowed\s+vlan\s+(?:add\s+)?(.+)$",
     re.IGNORECASE,
 )
+ORIGIN_TAG_RE = re.compile(r"ORIGIN=([A-Z_]+)", re.IGNORECASE)
 
 IP_INT_BRIEF_ROW_RE = re.compile(
     r"^\s*(?P<ifname>(?:Loopback\d+|(?:Fa|Gi|Te|Tw|Twe)\d+(?:/\d+){0,2}))\s+"
@@ -721,6 +740,14 @@ def normalize_port(p: str) -> str:
     m = re.search(r"(Fa|Gi|Te|Tw|Twe)\d+(?:/\d+){0,2}", p, re.IGNORECASE)
     return m.group(0) if m else ""
 
+
+def _strip_timestamp_prefix(line: str) -> str:
+    """Elimina prefijos de marcas temporales tipo '29/10[15:35:26]' al inicio de la línea."""
+    m = TIMESTAMP_PREFIX_RE.match(line)
+    if not m:
+        return line
+    return line[m.end():]
+
 # ---------- Helpers de nombres/interfaz ----------
 
 def _format_numbered_name(base_name: str, ordinal: int) -> str:
@@ -735,25 +762,6 @@ def _resolve_new_interface(builder: Union[Callable[[int], str], str], idx: int) 
     if callable(builder):
         return builder(idx)
     return f"{builder}{idx}"
-
-def _is_speed_10(speed: Optional[str]) -> bool:
-    if not speed:
-        return False
-    s = speed.strip().lower()
-    if not s:
-        return False
-    if "g" in s:
-        return False
-    if s.startswith("a-"):
-        s = s[2:]
-    match = re.search(r"\d+", s)
-    if not match:
-        return False
-    try:
-        value = int(match.group(0))
-    except ValueError:
-        return False
-    return value == 10
 
 # ---------- Parseos de running-config ----------
 
@@ -799,6 +807,26 @@ def parse_interface_configs_from_running_config(lines: List[str]) -> Dict[str, L
                 buf.append(ln)
     flush()
     return iface_cfg
+
+
+def _block_forces_speed_10(block: Optional[List[str]]) -> bool:
+    """Indica si la interfaz está configurada con velocidad fija a 10 Mbps."""
+    if not block:
+        return False
+    for ln in block:
+        if re.match(r"^\s*speed\s+10\s*$", ln, re.IGNORECASE):
+            return True
+    return False
+
+
+def _description_from_block(block: Optional[List[str]]) -> Optional[str]:
+    if not block:
+        return None
+    for ln in block:
+        m = re.match(r"^\s*description\s+(.+)$", ln, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
 
 
 def _expand_vlan_token(token: str) -> List[str]:
@@ -848,6 +876,15 @@ def _vlans_from_tag_string(tag_str: Optional[str]) -> Set[str]:
             for part in values.split(","):
                 vlans.update(_expand_vlan_token(part))
     return vlans
+
+
+def _origin_from_tag_string(tag_str: Optional[str]) -> Optional[str]:
+    if not tag_str or tag_str == "N/A":
+        return None
+    match = ORIGIN_TAG_RE.search(tag_str)
+    if match:
+        return match.group(1).upper()
+    return None
 
 
 def parse_time_interval(value: str) -> Optional[int]:
@@ -922,13 +959,152 @@ def parse_last_io_information(lines: List[str]) -> Dict[str, Tuple[str, str, Opt
     return last_map
 
 
+def parse_global_metadata(lines: List[str], iface_cfg_map: Dict[str, List[str]]) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "snmp_location": None,
+        "snmp_contact": None,
+        "ip_default_gateway": None,
+        "ip_pim_register_source": None,
+        "ip_pim_rp_lines": [],
+        "ip_tftp_source_interface": None,
+        "ip_http_client_source_interface": None,
+        "snmp_source_interface": None,
+        "ntp_source": None,
+        "ip_name_server_lines": [],
+        "router_blocks": [],
+    }
+
+    in_interface = False
+    router_buffer: Optional[List[str]] = None
+
+    for raw in lines:
+        stripped = raw.rstrip("\n")
+        line = stripped.strip()
+        lower = line.lower()
+
+        if not line:
+            continue
+
+        if lower.startswith("interface "):
+            in_interface = True
+            if router_buffer is not None:
+                metadata["router_blocks"].append(router_buffer)
+                router_buffer = None
+            continue
+
+        if line == "!":
+            if in_interface:
+                in_interface = False
+            if router_buffer is not None:
+                metadata["router_blocks"].append(router_buffer)
+                router_buffer = None
+            continue
+
+        if in_interface:
+            continue
+
+        if lower.startswith("router "):
+            if router_buffer is not None:
+                metadata["router_blocks"].append(router_buffer)
+            router_buffer = [stripped]
+            continue
+
+        if router_buffer is not None:
+            router_buffer.append(stripped)
+            continue
+
+        m_loc = SNMP_LOCATION_RE.match(line)
+        if m_loc:
+            metadata["snmp_location"] = m_loc.group(1).strip()
+            continue
+
+        m_contact = SNMP_CONTACT_RE.match(line)
+        if m_contact:
+            metadata["snmp_contact"] = m_contact.group(1).strip()
+            continue
+
+        m_gw = IP_DEFAULT_GATEWAY_RE.match(line)
+        if m_gw:
+            metadata["ip_default_gateway"] = m_gw.group(1).strip()
+            continue
+
+        m_register = IP_PIM_REGISTER_RE.match(line)
+        if m_register:
+            metadata["ip_pim_register_source"] = to_short_ifname(m_register.group(1).strip())
+            continue
+
+        if IP_PIM_RP_RE.match(line):
+            metadata["ip_pim_rp_lines"].append(stripped)
+            continue
+
+        m_tftp = IP_TFTP_SOURCE_RE.match(line)
+        if m_tftp:
+            metadata["ip_tftp_source_interface"] = to_short_ifname(m_tftp.group(1).strip())
+            continue
+
+        m_http = IP_HTTP_CLIENT_SOURCE_RE.match(line)
+        if m_http:
+            metadata["ip_http_client_source_interface"] = to_short_ifname(m_http.group(1).strip())
+            continue
+
+        m_snmp_src = SNMP_SOURCE_IF_RE.match(line)
+        if m_snmp_src:
+            metadata["snmp_source_interface"] = to_short_ifname(m_snmp_src.group(1).strip())
+            continue
+
+        m_ntp = NTP_SOURCE_RE.match(line)
+        if m_ntp:
+            metadata["ntp_source"] = to_short_ifname(m_ntp.group(1).strip())
+            continue
+
+        if IP_NAME_SERVER_RE.match(line):
+            metadata["ip_name_server_lines"].append(stripped)
+            continue
+
+    if router_buffer is not None:
+        metadata["router_blocks"].append(router_buffer)
+
+    management_candidate = (
+        metadata.get("ip_tftp_source_interface")
+        or metadata.get("ip_http_client_source_interface")
+        or metadata.get("snmp_source_interface")
+        or metadata.get("ntp_source")
+    )
+    metadata["management_interface"] = _guess_management_interface(iface_cfg_map, management_candidate)
+
+    return metadata
+
+
+def _guess_management_interface(
+    iface_cfg_map: Dict[str, List[str]],
+    preferred: Optional[str],
+) -> Optional[str]:
+    if preferred:
+        return to_short_ifname(preferred)
+
+    vlan_candidates: List[str] = []
+    for ifname, block in iface_cfg_map.items():
+        short = to_short_ifname(ifname)
+        if short.lower().startswith("vlan"):
+            if any(re.search(r"\bip address\b", ln, re.IGNORECASE) for ln in block):
+                vlan_candidates.append(short)
+    if vlan_candidates:
+        return vlan_candidates[0]
+
+    if "Loopback0" in iface_cfg_map:
+        return "Loopback0"
+
+    return preferred
+
+
 def parse_video_interface_order(lines: List[str]) -> List[str]:
     """Devuelve el orden natural de interfaces para equipos de vídeo."""
     order: List[str] = []
+    normalized = [_strip_timestamp_prefix(ln.rstrip("\n")) for ln in lines]
     in_status = False
     saw_status = False
 
-    for ln in lines:
+    for ln in normalized:
         if INT_STATUS_HEADER_RE.search(ln):
             in_status = True
             saw_status = True
@@ -944,7 +1120,7 @@ def parse_video_interface_order(lines: List[str]) -> List[str]:
     if saw_status and order:
         return order
 
-    for ln in lines:
+    for ln in normalized:
         m = IP_INT_BRIEF_ROW_RE.search(ln)
         if not m:
             continue
@@ -962,7 +1138,9 @@ def parse_log(filepath: str):
     mac_dynamic: Dict[str, List[str]] = {}
 
     with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
+        raw_lines = f.readlines()
+
+    lines = [_strip_timestamp_prefix(line.rstrip("\n")) for line in raw_lines]
 
     # Equipo:
     for line in lines:
@@ -989,10 +1167,7 @@ def parse_log(filepath: str):
                     "port":   m.group("port").strip(),
                     "name":   m.group("name").strip(),
                     "status": m.group("status").lower(),
-                    "vlan":   m.group("vlan").strip(),
-                    "duplex": m.group("duplex").strip(),
-                    "speed":  m.group("speed").strip(),
-                    "type":   (m.group("type") or "").strip(),
+                    "vlan":   m.group("vlan").strip()
                 })
 
     # mac address-table
@@ -1018,8 +1193,9 @@ def parse_log(filepath: str):
     voice_map     = parse_voice_vlans_from_running_config(lines)
     iface_cfg_map = parse_interface_configs_from_running_config(lines)
     last_io_map   = parse_last_io_information(lines)
+    metadata      = parse_global_metadata(lines, iface_cfg_map)
 
-    return hostname, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map
+    return hostname, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map, metadata
 
 # ---------- Inventarios ----------
 
@@ -1031,18 +1207,27 @@ def build_inventory_from_logs(filepaths: List[str]):
     """
     wifi_items, voip_items, uca_items, ambar_other_items, trunk_items = [], [], [], [], []
     all_iface_cfgs: Dict[Tuple[str, str], List[str]] = {}
+    host_metadata: Dict[str, Dict[str, Any]] = {}
 
     for fp in filepaths:
-        host, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map = parse_log(fp)
+        host, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map, metadata = parse_log(fp)
+
+        host_metadata[host] = metadata
 
         # Guarda bloques running por interfaz
         for if_short, block in iface_cfg_map.items():
             all_iface_cfgs[(host, if_short)] = block
 
+        description_map = {
+            if_short: _description_from_block(block)
+            for if_short, block in iface_cfg_map.items()
+        }
+
         for r in int_rows:
             status = r["status"].lower()
             port_short = r["port"]
             last_info = last_io_map.get(port_short)
+            block = iface_cfg_map.get(port_short)
 
             def _has_recent_activity(info: Optional[Tuple[str, str, Optional[int]]]) -> bool:
                 if not info:
@@ -1060,6 +1245,8 @@ def build_inventory_from_logs(filepaths: List[str]):
             if vlan in IGNORED_VLANS:
                 continue
             voice_vlan = voice_map.get(port_short)
+            voice_tag = voice_vlan or (vlan if vlan in VOIP_VLANS else None)
+            forces_speed_10 = _block_forces_speed_10(block)
 
             vlan_lc = vlan.lower()
             if last_info:
@@ -1073,14 +1260,21 @@ def build_inventory_from_logs(filepaths: List[str]):
                 if last_seconds is not None and last_seconds >= INACTIVITY_THRESHOLD_SECONDS:
                     continue
 
+            description = description_map.get(port_short)
             if vlan_lc == "trunk":
                 idx_value = _extract_if_index(port_short)
                 if idx_value is None or idx_value > 48:
                     continue
-                name_field = r["name"] if r["name"] else ""
-                if "uplink" in name_field.lower():
+                block = iface_cfg_map.get(port_short)
+                name_field = description or (r["name"] if r["name"] else "")
+                name_lower = name_field.lower()
+                if "uplink" in name_lower or "core" in name_lower:
                     continue
-                allowed_vlans = _parse_allowed_vlans_from_block(iface_cfg_map.get(port_short))
+                if block and any(
+                    re.search(r"\bchannel-group\b", ln, re.IGNORECASE) for ln in block
+                ):
+                    continue
+                allowed_vlans = _parse_allowed_vlans_from_block(block)
                 trunk_items.append({
                     "src_host": host,
                     "src_port": port_short,
@@ -1090,6 +1284,7 @@ def build_inventory_from_logs(filepaths: List[str]):
                     "voice_vlan": None,
                     "mode": "trunk",
                     "allowed_vlans": allowed_vlans,
+                    "origin": "TRUNK",
                 })
                 continue
 
@@ -1097,30 +1292,30 @@ def build_inventory_from_logs(filepaths: List[str]):
                 # Formatos raros no numéricos -> descartar
                 continue
 
-            speed = r.get("speed")
+            name_field = description or (r["name"] if r["name"] else "N/A")
             item = {
                 "src_host": host,
                 "src_port": port_short,
-                "name": r["name"] if r["name"] else "N/A",
+                "name": name_field,
                 "vlan": vlan,
                 "macs": mac_map.get(port_short, []),
-                "voice_vlan": voice_vlan,
+                "voice_vlan": voice_tag,
                 "mode": "access",
-                "speed": speed,
             }
+            if forces_speed_10:
+                item["avoid_uxm"] = True
 
-            is_speed_10 = _is_speed_10(speed)
             if vlan in WIFI_VLANS:
-                if is_speed_10:
-                    item["force_non_wifi_member"] = True
-                    ambar_other_items.append(item)
-                else:
-                    wifi_items.append(item)
-            elif voice_vlan and voice_vlan in VOIP_VLANS:
+                item["origin"] = "WIFI"
+                wifi_items.append(item)
+            elif voice_vlan or vlan in VOIP_VLANS:
+                item["origin"] = "VOIP"
                 voip_items.append(item)
             elif vlan in UCA_VLANS:
+                item["origin"] = "UCA"
                 uca_items.append(item)
             else:
+                item["origin"] = "AMBAR"
                 ambar_other_items.append(item)
 
     def port_key(p):
@@ -1132,7 +1327,7 @@ def build_inventory_from_logs(filepaths: List[str]):
     uca_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     ambar_other_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     trunk_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
-    return wifi_items, voip_items, uca_items, ambar_other_items, trunk_items, all_iface_cfgs
+    return wifi_items, voip_items, uca_items, ambar_other_items, trunk_items, all_iface_cfgs, host_metadata
 
 
 # ---------- Mapeos ----------
@@ -1151,13 +1346,9 @@ def _mk_row(new_if_builder, idx_new, item, sw_name, group_tag):
         except ValueError:
             ordered = sorted(allowed_vlans)
         tags.append(f"VLANS={','.join(ordered)}")
-    speed = item.get("speed")
-    if speed:
-        speed_clean = str(speed).strip()
-        if speed_clean:
-            tags.append(f"SPEED={speed_clean}")
-    if item.get("force_non_wifi_member"):
-        tags.append("FORCE_NON_UXM")
+    origin = item.get("origin")
+    if origin:
+        tags.append(f"ORIGIN={origin}")
     tag_str = ";".join(tags) if tags else "N/A"
     return [
         item["src_host"],           # SW Actual
@@ -1226,21 +1417,17 @@ def _poe_member_capacities(required_slots: int):
 
 def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     global POE_MEMBER_METADATA
-    wifi_items = list(wifi_items)
-    ambar_others = list(ambar_others)
-    forced_wifi = [item for item in wifi_items if item.get("force_non_wifi_member")]
-    if forced_wifi:
-        wifi_items = [item for item in wifi_items if not item.get("force_non_wifi_member")]
-        ambar_others = forced_wifi + ambar_others
     has_wifi = bool(wifi_items)
     has_voip = bool(voip_items)
     reserve_after_wifi = RESERVED_AFTER_WIFI if has_wifi else 0
+    reserve_after_voip = RESERVED_AFTER_VOIP if has_voip else 0
     tail_free = RESERVED_TAIL_FREE if (has_wifi or has_voip) else 0
 
     base_slots = (
         len(wifi_items)
         + reserve_after_wifi
         + len(voip_items)
+        + reserve_after_voip
         + len(trunk_items)
         + tail_free
     )
@@ -1255,50 +1442,109 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         POE_MEMBER_METADATA.clear()
         return [], ambar_others
 
+    base_fixed = (
+        len(wifi_items)
+        + reserve_after_wifi
+        + len(voip_items)
+        + reserve_after_voip
+        + tail_free
+        + len(trunk_items)
+    )
+
+    def _build_meta(caps: List[int]) -> Tuple[List[Dict[str, Any]], int]:
+        meta: List[Dict[str, Any]] = []
+        total = 0
+        for member_index, capacity in enumerate(caps, start=1):
+            member_type = "wifi" if has_wifi and member_index == 1 else "poe"
+            usable = max(capacity - 2, 0)
+            meta.append(
+                {
+                    "index": member_index,
+                    "capacity": capacity,
+                    "type": member_type,
+                    "usable": usable,
+                }
+            )
+            total += usable
+        return meta, total
+
+    meta_info, total_usable = _build_meta(capacities)
+
+    while len(capacities) < POE_MAX_STACK_MEMBERS:
+        usable_for_ambar = max(total_usable - base_fixed, 0)
+        if usable_for_ambar >= len(ambar_others):
+            break
+        remaining_needed = len(ambar_others) - usable_for_ambar
+        if remaining_needed <= 0:
+            break
+        next_capacity = (
+            POE_MAX_PORTS
+            if (len(capacities) + 1) < POE_MAX_STACK_MEMBERS or remaining_needed > POE_AUX_FINAL_PORTS
+            else POE_AUX_FINAL_PORTS
+        )
+        capacities.append(next_capacity)
+        meta_info, total_usable = _build_meta(capacities)
+
     POE_MEMBER_METADATA.clear()
     wifi_counter = 0
     poe_counter = 0
-    for member_index, capacity in enumerate(capacities, start=1):
-        if has_wifi and member_index == 1:
+    for info in meta_info:
+        member_index = info["index"]
+        capacity = info["capacity"]
+        if info["type"] == "wifi":
             wifi_counter += 1
             sw_name = _format_numbered_name(NEW_SWITCH_WIFI_NAME, wifi_counter)
-            member_type = "wifi"
         else:
             poe_counter += 1
             sw_name = _format_numbered_name(NEW_SWITCH_POE_NAME, poe_counter)
-            member_type = "poe"
         POE_MEMBER_METADATA[member_index] = {
-            "type": member_type,
+            "type": info["type"],
             "sw_name": sw_name,
             "capacity": capacity,
             "usable_capacity": max(capacity - 2, 0),
         }
 
     total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
-
-    base_fixed = (
-        len(wifi_items)
-        + reserve_after_wifi
-        + len(voip_items)
-        + len(trunk_items)
-    )
     if base_fixed > total_usable:
         raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP configurados")
 
-    available_for_payload = total_usable - base_fixed
-    slots_for_ambar = min(len(ambar_others), available_for_payload)
-    ambar_for_poe = ambar_others[:slots_for_ambar]
-    ambar_overflow = ambar_others[slots_for_ambar:]
-    remaining_after_ambar = max(0, available_for_payload - slots_for_ambar)
-    tail_free_effective = min(tail_free, remaining_after_ambar)
+    tail_free_effective = tail_free if tail_free > 0 else 0
+    usable_for_ambar = max(total_usable - base_fixed, 0)
+    ambar_for_poe = ambar_others[:usable_for_ambar]
+    ambar_overflow = ambar_others[usable_for_ambar:]
+
+    wifi_primary = [it for it in wifi_items if not it.get("avoid_uxm")]
+    wifi_avoid = [it for it in wifi_items if it.get("avoid_uxm")]
+    voip_primary = [it for it in voip_items if not it.get("avoid_uxm")]
+    voip_avoid = [it for it in voip_items if it.get("avoid_uxm")]
+    ambar_primary: List[Dict[str, Any]] = []
+    ambar_avoid: List[Dict[str, Any]] = []
+    for it in ambar_for_poe:
+        if it.get("avoid_uxm"):
+            ambar_avoid.append(it)
+        else:
+            ambar_primary.append(it)
+
+    trunk_primary = [it for it in trunk_items if not it.get("avoid_uxm")]
+    trunk_avoid = [it for it in trunk_items if it.get("avoid_uxm")]
+
+    avoid_sequence: List[Dict[str, Any]] = []
+    avoid_sequence.extend(wifi_avoid)
+    avoid_sequence.extend(voip_avoid)
+    avoid_sequence.extend(ambar_avoid)
+    avoid_sequence.extend(trunk_avoid)
 
     sequence = []
-    sequence.extend(("ITEM", it) for it in wifi_items)
+    sequence.extend(("ITEM", it) for it in wifi_primary)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
-    sequence.extend(("ITEM", it) for it in voip_items)
-    sequence.extend(("ITEM", it) for it in ambar_for_poe)
+    sequence.extend(("ITEM", it) for it in voip_primary)
+    sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
+    sequence.extend(("ITEM", it) for it in ambar_primary)
+    sequence.extend(("ITEM", it) for it in trunk_primary)
+    if avoid_sequence:
+        sequence.append(("FORCE_NEXT", None))
+        sequence.extend(("ITEM", it) for it in avoid_sequence)
     sequence.extend(("LIBRE", None) for _ in range(tail_free_effective))
-    sequence.extend(("ITEM", it) for it in trunk_items)
 
     rows: List[List[str]] = []
     member_index = 1
@@ -1315,6 +1561,18 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         _pad_member_with_libres(rows, formatter, sw_name, usable_capacity + 1, total_ports, "POE")
 
     for kind, payload in sequence:
+        if kind == "FORCE_NEXT":
+            flush_current(idx)
+            member_index += 1
+            if member_index > len(capacities):
+                raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
+            member_info = POE_MEMBER_METADATA[member_index]
+            usable_capacity = int(member_info["usable_capacity"])
+            total_ports = int(member_info["capacity"])
+            formatter = _poe_interface_formatter(member_index)
+            sw_name = str(member_info["sw_name"])
+            idx = 1
+            continue
         while usable_capacity <= 0 or idx > usable_capacity:
             flush_current(idx)
             member_index += 1
@@ -1345,60 +1603,99 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
 
     return rows, ambar_overflow
 
+def _ambar_t_switch_capacities(required_ports: int) -> List[int]:
+    capacities: List[int] = []
+    remaining = required_ports
+    usable_default = max(AMBAR_T_DEFAULT_PORTS - AMBAR_T_RESERVED_TAIL, 0)
+    usable_large = max(AMBAR_T_LARGE_PORTS - AMBAR_T_RESERVED_TAIL, 0)
+
+    if remaining <= 0:
+        return [AMBAR_T_DEFAULT_PORTS]
+
+    while remaining > 0:
+        if usable_large and remaining > usable_default:
+            cap = AMBAR_T_LARGE_PORTS
+            usable = usable_large
+        else:
+            cap = AMBAR_T_DEFAULT_PORTS
+            usable = usable_default
+
+        if usable <= 0:
+            cap = AMBAR_T_LARGE_PORTS
+            usable = max(cap - AMBAR_T_RESERVED_TAIL, 0)
+
+        capacities.append(cap)
+        remaining -= usable if usable > 0 else cap
+
+    return capacities if capacities else [AMBAR_T_DEFAULT_PORTS]
+
+
+def _ambar_t_interface_formatter(member_index: int) -> Callable[[int], str]:
+    return lambda port_idx, member=member_index: f"GigabitEthernet{member}/0/{port_idx}"
+
+
 def make_mapping_ambar_t(ambar_items):
     if not ambar_items:
         return []
 
+    capacities = _ambar_t_switch_capacities(len(ambar_items))
     rows: List[List[str]] = []
-    total = len(ambar_items)
     idx_item = 0
     switch_ordinal = 1
 
-    while idx_item < total:
+    for capacity in capacities:
         sw_name = _format_numbered_name(NEW_SWITCH_AMBAR_T_NAME, switch_ordinal)
-        usable = max(AMBAR_T_MAX_PORTS - 2, 0)
-        for port_idx in range(1, AMBAR_T_MAX_PORTS + 1):
-            if port_idx <= usable and idx_item < total:
-                rows.append(_mk_row(NEW_IF_AMBAR_T_PREFIX, port_idx, ambar_items[idx_item], sw_name, "AMBAR_T"))
+        formatter = _ambar_t_interface_formatter(switch_ordinal)
+        usable = max(capacity - AMBAR_T_RESERVED_TAIL, 0)
+        for port_idx in range(1, capacity + 1):
+            if port_idx <= usable and idx_item < len(ambar_items):
+                rows.append(_mk_row(formatter, port_idx, ambar_items[idx_item], sw_name, "AMBAR_T"))
                 idx_item += 1
             else:
-                rows.append(_libre_row(NEW_IF_AMBAR_T_PREFIX, port_idx, sw_name, "AMBAR_T"))
+                rows.append(_libre_row(formatter, port_idx, sw_name, "AMBAR_T"))
         switch_ordinal += 1
 
     return rows
 
-def _uca_interface_formatter() -> Callable[[int], str]:
-    prefix = NEW_IF_UCA_T_PREFIX
-    return lambda port_idx, pref=prefix: f"{pref}{port_idx}"
+def _uca_interface_formatter(member_index: int) -> Callable[[int], str]:
+    return lambda port_idx, member=member_index: f"GigabitEthernet{member}/0/{port_idx}"
 
-def _uca_switch_capacities(required_ports: int) -> List[int]:
+def _uca_switch_capacities(required_ports: int, reserved_tail: int) -> List[int]:
     capacities: List[int] = []
     remaining = required_ports
+    usable_default = max(UCA_DEFAULT_PORTS - reserved_tail, 0)
+    usable_large = max(UCA_LARGE_PORTS - reserved_tail, 0)
+
     if remaining <= 0:
         return [UCA_DEFAULT_PORTS]
+
     while remaining > 0:
-        if remaining > max(UCA_LARGE_PORTS - UCA_RESERVED_TAIL_FREE, 0):
+        if usable_large and remaining > usable_default:
             cap = UCA_LARGE_PORTS
-        elif remaining > max(UCA_DEFAULT_PORTS - UCA_RESERVED_TAIL_FREE, 0):
-            cap = UCA_LARGE_PORTS
+            usable = usable_large
         else:
             cap = UCA_DEFAULT_PORTS
+            usable = usable_default
+
+        if usable <= 0:
+            cap = UCA_LARGE_PORTS
+            usable = max(cap - reserved_tail, 0)
+
         capacities.append(cap)
-        usable = max(cap - UCA_RESERVED_TAIL_FREE, 0)
-        remaining -= usable
+        remaining -= usable if usable > 0 else cap
+
     return capacities if capacities else [UCA_DEFAULT_PORTS]
 
-def make_mapping_uca(uca_items):
+def make_mapping_uca(uca_items, reserved_tail: int):
     total_items = len(uca_items)
-    capacities = _uca_switch_capacities(total_items)
+    capacities = _uca_switch_capacities(total_items, reserved_tail)
     rows: List[List[str]] = []
     idx_item = 0
     switch_ordinal = 1
-    formatter = _uca_interface_formatter()
-
     for capacity in capacities:
         sw_name = _format_numbered_name(NEW_SWITCH_UCA_T_NAME, switch_ordinal)
-        usable = max(capacity - UCA_RESERVED_TAIL_FREE, 0)
+        usable = max(capacity - reserved_tail, 0)
+        formatter = _uca_interface_formatter(switch_ordinal)
         for port_idx in range(1, capacity + 1):
             if port_idx <= usable and idx_item < total_items:
                 rows.append(_mk_row(formatter, port_idx, uca_items[idx_item], sw_name, "UCA"))
@@ -1410,15 +1707,76 @@ def make_mapping_uca(uca_items):
     return rows
 
 
-def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tuple[str, str], List[str]]]:
+def _apply_uca_management_trunks(uca_rows: List[List[str]], *, include_mgmt_vlan: bool) -> None:
+    if not include_mgmt_vlan:
+        return
+
+    entries: List[Tuple[int, List[str]]] = []
+    allowed: Set[str] = set()
+
+    for idx, row in enumerate(uca_rows):
+        if row[-1] != "UCA":
+            continue
+        entries.append((idx, row))
+        if row[0] == "LIBRE":
+            continue
+        vlan = row[6]
+        if vlan and vlan.isdigit():
+            allowed.add(vlan)
+        allowed.update(_vlans_from_tag_string(row[8]))
+
+    if not entries:
+        return
+
+    allowed.add("623")
+    try:
+        allowed_list = sorted(allowed, key=int)
+    except ValueError:
+        allowed_list = sorted(allowed)
+
+    if not allowed_list:
+        allowed_list = ["623"]
+
+    pos, last_row = max(
+        entries,
+        key=lambda entry: (_extract_if_index(entry[1][3]) or -1, entry[0]),
+    )
+    iface_new = last_row[3]
+    sw_name = last_row[5]
+    tag_str = f"VLANS={','.join(allowed_list)};ORIGIN=TRUNK"
+
+    uca_rows[pos] = [
+        "TRUNK",
+        "TRUNK",
+        "TRUNK UCA",
+        iface_new,
+        "TRUNK UCA",
+        sw_name,
+        "trunk",
+        "trunk",
+        tag_str,
+        "N/A",
+        "UCA",
+    ]
+
+
+def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tuple[str, str], List[str]], Dict[str, Dict[str, Any]]]:
     rows: List[List[str]] = []
     iface_cfgs: Dict[Tuple[str, str], List[str]] = {}
+    metadata_map: Dict[str, Dict[str, Any]] = {}
 
     for fp in video_logs:
-        host, int_rows, _mac_map, _voice_map, iface_cfg_map, _last_io_map = parse_log(fp)
+        host, int_rows, _mac_map, _voice_map, iface_cfg_map, _last_io_map, metadata = parse_log(fp)
+
+        metadata_map[host] = metadata
 
         for if_short, block in iface_cfg_map.items():
             iface_cfgs[(host, if_short)] = block[:]
+
+        description_map = {
+            if_short: _description_from_block(block)
+            for if_short, block in iface_cfg_map.items()
+        }
 
         with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
             lines = fh.readlines()
@@ -1426,14 +1784,20 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
         if not order:
             order = sorted(iface_cfg_map.keys(), key=_stack_interface_sort_key)
 
-        name_by_port = {
-            to_short_ifname(row["port"]): row.get("name") or "N/A"
-            for row in int_rows
-        }
-
         sw_name = NEW_SWITCH_VIDEO_NAME
         for if_src in order:
-            desc = name_by_port.get(if_src, "N/A")
+            desc = description_map.get(if_src)
+            if desc is None:
+                desc = next(
+                    (
+                        row.get("name")
+                        for row in int_rows
+                        if to_short_ifname(row["port"]) == if_src and row.get("name")
+                    ),
+                    None,
+                )
+            if not desc:
+                desc = "N/A"
             new_if = if_src  # se conserva el nombre original
             rows.append([
                 host,
@@ -1449,14 +1813,30 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
                 "VIDEO",
             ])
 
-    return rows, iface_cfgs
+    return rows, iface_cfgs, metadata_map
 
 def _extract_if_index(ifname: str) -> Optional[int]:
     m = re.search(r"(\d+)$", ifname)
     return int(m.group(1)) if m else None
 
+
+def _extract_member_index(ifname: str) -> Optional[int]:
+    m = re.match(
+        r"(?:TwoGigabitEthernet|TenGigabitEthernet|GigabitEthernet|TwentyFiveGigE)(\d+)",
+        ifname,
+        re.IGNORECASE,
+    )
+    return int(m.group(1)) if m else None
+
+
 def _sort_group_rows(rows: List[List[str]]) -> None:
-    rows.sort(key=lambda r: (r[5], _extract_if_index(r[3]) or 0))
+    rows.sort(
+        key=lambda r: (
+            r[5],
+            _extract_member_index(r[3]) or 0,
+            _extract_if_index(r[3]) or 0,
+        )
+    )
 
 # ---------- Excel ----------
 
@@ -1471,7 +1851,7 @@ def export_excel(all_rows, out_dir):
     df = pd.DataFrame(all_rows, columns=cols)
 
     sheet_defs = [
-        ("POE", "POE"),
+        ("AMBAR_POE", "POE"),
         ("AMBAR_T", "AMBAR_T"),
         ("UCA", "UCA"),
         ("VIDEO", "VIDEO"),
@@ -1481,6 +1861,7 @@ def export_excel(all_rows, out_dir):
         wb = w.book
         fmt_header = wb.add_format({'bold': True})
         fmt_libre  = wb.add_format({'bg_color': '#FFF59D'})
+        fmt_trunk  = wb.add_format({'bg_color': '#FFE0B2'})
         vlan_col_format = wb.add_format({'num_format': '@'})
         palette = ['#E3F2FD', '#FCE4EC', '#E8F5E9', '#FFF3E0', '#EDE7F6', '#F1F8E9', '#E0F7FA']
         color_format_cache: Dict[str, Any] = {}
@@ -1490,14 +1871,71 @@ def export_excel(all_rows, out_dir):
             if subset.empty:
                 continue
 
-            subset.to_excel(w, sheet_name=sheet_name, index=False)
+            sheet_df = subset.copy()
+
+            display_map: Dict[str, str] = {}
+            if group_tag == "POE":
+                for sw_name, grp in subset.groupby("SW Nuevo"):
+                    if grp.empty:
+                        continue
+                    first_if = grp["Interface nuevo"].iloc[0]
+                    member_idx = _extract_member_index(first_if) if isinstance(first_if, str) else None
+                    meta = POE_MEMBER_METADATA.get(member_idx, {}) if member_idx else {}
+                    capacity = meta.get("capacity") if meta else None
+                    if not capacity:
+                        try:
+                            max_port = grp["Interface nuevo"].map(_extract_if_index).max()
+                        except Exception:
+                            max_port = None
+                        capacity = 24 if max_port and max_port <= 24 else 48
+                    label_size = 24 if capacity and capacity <= 24 else 48
+                    origins = {
+                        origin
+                        for origin in (
+                            _origin_from_tag_string(value)
+                            for value in grp["Tags"].tolist()
+                        )
+                        if origin
+                    }
+                    if meta.get("type") == "wifi":
+                        display_map[sw_name] = f"C9300-{label_size}P-UXM"
+                    elif ("AMBAR" in origins) and not (origins & {"WIFI", "VOIP"}):
+                        display_map[sw_name] = f"C9300-{label_size}T"
+                    else:
+                        display_map[sw_name] = f"C9300-{label_size}P"
+            elif group_tag == "AMBAR_T":
+                for sw_name, grp in subset.groupby("SW Nuevo"):
+                    if grp.empty:
+                        continue
+                    try:
+                        max_port = grp["Interface nuevo"].map(_extract_if_index).max()
+                    except Exception:
+                        max_port = None
+                    label_size = 24 if max_port and max_port <= 24 else 48
+                    display_map[sw_name] = f"C9300-{label_size}T"
+            elif group_tag == "UCA":
+                for sw_name, grp in subset.groupby("SW Nuevo"):
+                    if grp.empty:
+                        continue
+                    try:
+                        max_port = grp["Interface nuevo"].map(_extract_if_index).max()
+                    except Exception:
+                        max_port = None
+                    label_size = 24 if max_port and max_port <= 24 else 48
+                    display_map[sw_name] = f"C9300-{label_size}T"
+
+            if display_map:
+                sheet_df["SW Nuevo"] = sheet_df["SW Nuevo"].map(lambda v: display_map.get(v, v))
+
+            sheet_df.to_excel(w, sheet_name=sheet_name, index=False)
             ws = w.sheets[sheet_name]
 
             ws.set_row(0, None, fmt_header)
             ws.set_column("G:G", None, vlan_col_format)
 
-            sw_actual_list = subset["SW Actual"].tolist()
-            sw_new_list = subset["SW Nuevo"].tolist()
+            sw_actual_list = sheet_df["SW Actual"].tolist()
+            sw_new_list = sheet_df["SW Nuevo"].tolist()
+            mode_list = sheet_df["Mode"].tolist()
             unique_switches = list(dict.fromkeys(sw_new_list))
             switch_formats: Dict[str, Any] = {}
             for idx_sw, sw in enumerate(unique_switches):
@@ -1515,12 +1953,16 @@ def export_excel(all_rows, out_dir):
                 if str(sw_actual).upper() == "LIBRE":
                     ws.set_row(row_idx, None, fmt_libre)
                 else:
-                    sw_new = sw_new_list[row_idx - 1]
-                    fmt = switch_formats.get(sw_new)
-                    if fmt:
-                        ws.set_row(row_idx, None, fmt)
+                    mode_value = (mode_list[row_idx - 1] or "").lower() if row_idx - 1 < len(mode_list) else ""
+                    if mode_value == "trunk":
+                        ws.set_row(row_idx, None, fmt_trunk)
+                    else:
+                        sw_new = sw_new_list[row_idx - 1]
+                        fmt = switch_formats.get(sw_new)
+                        if fmt:
+                            ws.set_row(row_idx, None, fmt)
 
-            col_index = subset.columns.get_loc("_Grupo")
+            col_index = sheet_df.columns.get_loc("_Grupo")
             ws.set_column(col_index, col_index, None, None, {'hidden': True})
 
     return xlsx
@@ -1550,8 +1992,21 @@ AMBAR_TEMPLATE_PATH       = pick_existing_path(AMBAR_TEMPLATE_DEFAULT)       or 
 UCA_TEMPLATE_PATH         = pick_existing_path(UCA_TEMPLATE_DEFAULT)         or UCA_TEMPLATE_DEFAULT
 AMBAR_EXTRA_TEMPLATE_PATH = pick_existing_path(AMBAR_EXTRA_TEMPLATE_DEFAULT) or AMBAR_EXTRA_TEMPLATE_DEFAULT
 UCA_EXTRA_TEMPLATE_PATH   = pick_existing_path(UCA_EXTRA_TEMPLATE_DEFAULT)   or UCA_EXTRA_TEMPLATE_DEFAULT
-VIDEO_TEMPLATE_PATH       = pick_existing_path(VIDEO_TEMPLATE_DEFAULT)       or VIDEO_TEMPLATE_DEFAULT
-VIDEO_EXTRA_TEMPLATE_PATH = pick_existing_path(VIDEO_EXTRA_TEMPLATE_DEFAULT) or VIDEO_EXTRA_TEMPLATE_DEFAULT
+
+VIDEO_ACL_LINES = [
+    "access-list 10 permit 89.1.7.153",
+    "access-list 10 remark Gestion_VIDEO",
+    "access-list 10 permit 10.192.128.0 0.0.255.255",
+    "access-list 10 permit 104.16.0.0 0.0.255.255",
+    "access-list 10 permit 104.8.20.0 0.0.0.255",
+    "access-list 10 permit 104.1.0.0 0.0.255.255",
+    "access-list 10 permit 10.192.132.0 0.0.1.255",
+    "access-list 10 permit 172.24.3.0 0.0.0.255",
+    "access-list 10 permit 172.24.5.0 0.0.0.255",
+    "access-list 10 permit 172.24.32.0 0.0.0.255",
+    "access-list 10 permit 172.24.37.0 0.0.0.255",
+    "access-list 10 permit 104.192.128.0 0.0.255.255",
+]
 
 def _read_template_file(path: str) -> List[str]:
     if not os.path.exists(path):
@@ -1662,7 +2117,7 @@ def _ambar_extra_base_lines() -> List[str]:
         "username NAC privilege 7 secret 9 $14$vVH7$Ezprg0JsSnaXVU$mxbty5BUxkUggfGwRM.D8TUnrhy2dgbt.i53OjvP6GQ",
         "!",
         "!",
-        "ip default-gateway 10.192.131.254",
+        "ip default-gateway 10.192.130.254",
         "ip forward-protocol nd",
         "no ip http server",
         "ip http authentication aaa login-authentication TAC-AUTH",
@@ -1850,20 +2305,6 @@ def _ambar_extra_base_lines() -> List[str]:
     ])
     return lines
 
-
-def _ambar_vlan_623_lines() -> List[str]:
-    return [
-        "vlan 623",
-        " name BCN_ACC_GESTION_AMBAR",
-        "!",
-        "interface Vlan623",
-        " ip address 10.192.130.1XX 255.255.254.0",
-        "!",
-        "ip tftp source-interface Vlan623",
-        "ip http client source-interface Vlan623",
-        "ip tftp source-interface Vlan623",
-        "ntp source Vlan623",
-    ]
 
 def _uca_extra_base_lines() -> List[str]:
     lines = [
@@ -2152,8 +2593,22 @@ def _uca_extra_base_lines() -> List[str]:
     return lines
 
 
-def _video_extra_base_lines() -> List[str]:
-    lines = [
+def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
+    def _short(name: Optional[str]) -> Optional[str]:
+        return to_short_ifname(name) if name else None
+
+    mgmt_if = _short(metadata.get("management_interface")) or "Loopback0"
+    default_gateway = metadata.get("ip_default_gateway")
+    register_if = _short(metadata.get("ip_pim_register_source")) or mgmt_if
+    rp_lines = metadata.get("ip_pim_rp_lines", [])
+    name_servers = metadata.get("ip_name_server_lines") or ["ip name-server 104.16.99.100"]
+    snmp_contact = metadata.get("snmp_contact") or DEFAULT_SNMP_CONTACT
+    tftp_if = _short(metadata.get("ip_tftp_source_interface")) or mgmt_if
+    http_if = _short(metadata.get("ip_http_client_source_interface")) or mgmt_if
+    snmp_src_if = _short(metadata.get("snmp_source_interface")) or mgmt_if
+    ntp_source_if = _short(metadata.get("ntp_source")) or mgmt_if
+
+    lines: List[str] = [
         "service password-encryption",
         "!",
         "aaa new-model",
@@ -2178,7 +2633,14 @@ def _video_extra_base_lines() -> List[str]:
         "ip multicast-routing",
         "ip multicast multipath",
         "!",
-        "ip name-server 104.16.99.100",
+    ]
+
+    for ns in name_servers:
+        ns_line = ns.strip()
+        if ns_line:
+            lines.append(ns_line)
+
+    lines.extend([
         "no ip domain lookup",
         "ip domain name aena.es",
         "!",
@@ -2186,11 +2648,13 @@ def _video_extra_base_lines() -> List[str]:
         "!",
         "lldp run",
         "!",
-        "ip tftp source-interface Loopback0",
+        f"ip tftp source-interface {tftp_if}",
+        f"ip http client source-interface {http_if}",
         "ip ssh time-out 60",
         "ip ssh authentication-retries 2",
         "ip ssh version 2",
         "ip scp server enable",
+        "ip tftp blocksize 512",
         "!",
         "archive",
         " log config",
@@ -2203,31 +2667,27 @@ def _video_extra_base_lines() -> List[str]:
         "!",
         "username admin privilege 15 secret 0 7BCN@ena.2024,",
         "!",
-        "interface GigabitEthernet0/0",
-        " vrf forwarding Mgmt-vrf",
-        " ip address 6.6.6.6 255.255.255.252",
-        " negotiation auto",
-        "no shutdown",
-        "!",
-        "interface Loopback0",
-        " ip address 10.192.132.11 255.255.255.255",
-        "!",
-        "ip default-gateway 10.192.133.254",
-        "ip pim rp-address 104.241.254.254",
-        "ip pim register-source Loopback0",
+    ])
+
+    if default_gateway:
+        lines.append(f"ip default-gateway {default_gateway}")
+
+    lines.extend([
         "ip forward-protocol nd",
         "no ip http server",
         "ip http authentication aaa login-authentication TAC-AUTH",
         "ip http authentication aaa exec-authorization TAC-AUTO",
         "ip http secure-server",
-        "ip http client source-interface Loopback0",
-        "ip tftp source-interface Loopback0",
-        "ip tftp blocksize 512",
-        "ip ssh time-out 60",
-        "ip ssh authentication-retries 2",
-        "ip ssh version 2",
-        "ip scp server enable",
-        "!",
+    ])
+
+    if register_if:
+        lines.append(f"ip pim register-source {register_if}")
+    for rp in rp_lines:
+        rp_line = rp.strip()
+        if rp_line:
+            lines.append(rp_line)
+
+    lines.extend([
         "logging trap debugging",
         "logging host 4.9.0.135",
         "logging host 104.16.0.225",
@@ -2248,6 +2708,8 @@ def _video_extra_base_lines() -> List[str]:
         "snmp-server view V3bcnVIDro iso included",
         "snmp-server community V3bcnVIDro RO",
         "snmp-server community V3bcnVIDrw RW",
+        "snmp-server community GreBCNro RO",
+        "snmp-server community BCN2010rw RW",
         "snmp-server user V3Dcom V3groupDCOM v3 auth sha #2024@En@! priv des @En@,.2025!",
         "snmp-server enable traps",
         "snmp-server host 104.16.0.225 version 2c GreBCNro",
@@ -2256,7 +2718,13 @@ def _video_extra_base_lines() -> List[str]:
         "snmp-server host 4.9.0.135 version 3 priv V3gesred",
         "snmp-server host 104.18.220.10 version 2c GreBCNro",
         "snmp-server host 104.18.220.10 version 3 priv V3gesred",
-        "snmp-server source-interface traps loopback 0",
+    ])
+
+    if snmp_src_if:
+        lines.append(f"snmp-server source-interface traps {snmp_src_if}")
+
+    lines.extend([
+        f"snmp-server contact {snmp_contact}",
         "!",
         "banner exec ^C",
         "Session established to $(hostname) on line $(line)",
@@ -2351,40 +2819,27 @@ def _video_extra_base_lines() -> List[str]:
         " login authentication TAC-AUTH",
         " transport preferred ssh",
         "!",
-        "ntp source Loopback0",
+    ])
+
+    if ntp_source_if:
+        lines.append(f"ntp source {ntp_source_if}")
+    lines.extend([
         "ntp server 104.253.1.1",
         "ntp server 104.253.1.2",
         "!",
-        "access-list 10 permit 89.1.7.153",
-        "access-list 10 remark Gestion_VIDEO",
-        "access-list 10 permit 10.192.128.0 0.255.255.255",
-        "access-list 10 permit 104.16.0.0 0.0.255.255",
-        "access-list 10 permit 104.8.20.0 0.0.0.255",
-        "access-list 10 permit 104.1.0.0 0.0.255.255",
-        "access-list 10 permit 10.192.132.0 0.0.1.255",
-        "access-list 10 permit 172.24.3.0 0.0.0.255",
-        "access-list 10 permit 172.24.5.0 0.0.0.255",
-        "access-list 10 permit 172.24.32.0 0.0.0.255",
-        "access-list 10 permit 172.24.37.0 0.0.0.255",
-        "access-list 10 permit 104.192.128.0 0.0.255.255",
-        "!",
-        "snmp-server location <LOCATION ANTIGUO SWITCH>",
-        "snmp-server contact dmanau@aena.es",
-        "!",
-        "router ospf 1",
-        " log-adjacency-changes",
-        " area 18 stub no-summary",
-        " area 120 stub no-summary",
-        " timers throttle spf 100 100 1000",
-        " timers throttle lsa all 5 5 200",
-        " redistribute connected",
-        " network X.X.X.X 0.0.0.255 area 18",
-        " network 104.129.18.0 0.0.0.255 area 18",
-        " network 104.131.18.0 0.0.0.255 area 18",
-        " network 104.241.2.50 0.0.0.0 area 18",
-        " network 104.241.2.54 0.0.0.0 area 18",
-        "!",
-    ]
+    ])
+
+    lines.extend(VIDEO_ACL_LINES)
+    lines.append("!")
+
+    router_blocks = metadata.get("router_blocks", [])
+    for block in router_blocks:
+        for ln in block:
+            stripped = ln.strip()
+            if stripped:
+                lines.append(stripped)
+        lines.append("!")
+
     return lines
 
 def _emit_base_template(
@@ -2400,9 +2855,6 @@ def _emit_base_template(
     elif which == "UCA":
         base_lines = _read_template_file(UCA_TEMPLATE_PATH)
         base_name  = "UCA"
-    elif which == "VIDEO":
-        base_lines = _read_template_file(VIDEO_TEMPLATE_PATH)
-        base_name  = "VIDEO"
     else:
         base_lines = []
         base_name  = "GENERIC"
@@ -2421,10 +2873,6 @@ def _emit_base_template(
         if extra_lines:
             f.write("!\n! === CONFIG BASE AMBAR ADICIONAL ===\n")
             for ln in extra_lines:
-                f.write(ln + ("\n" if not ln.endswith("\n") else ""))
-        if include_vlan_623:
-            f.write("!\n! === CONFIG ADICIONAL VLAN 623 ===\n")
-            for ln in _ambar_vlan_623_lines():
                 f.write(ln + ("\n" if not ln.endswith("\n") else ""))
     elif which == "UCA":
         extra_lines = _read_template_file(UCA_EXTRA_TEMPLATE_PATH)
@@ -2446,14 +2894,6 @@ def _emit_base_template(
                     if lower.startswith("name "):
                         continue
                 f.write(ln + ("\n" if not ln.endswith("\n") else ""))
-    elif which == "VIDEO":
-        extra_lines = _read_template_file(VIDEO_EXTRA_TEMPLATE_PATH)
-        if not extra_lines:
-            extra_lines = _video_extra_base_lines()
-        if extra_lines:
-            f.write("!\n! === CONFIG BASE VIDEO ADICIONAL ===\n")
-            for ln in extra_lines:
-                f.write(ln + ("\n" if not ln.endswith("\n") else ""))
 
 
 def _filter_out_sticky(lines: List[str]) -> List[str]:
@@ -2466,6 +2906,8 @@ def _filter_out_sticky(lines: List[str]) -> List[str]:
             else:
                 # Descarta líneas que fijan direcciones MAC concretas.
                 continue
+        elif re.search(r"switchport\s+port-security\s+violation", ln, re.IGNORECASE):
+            continue
         else:
             filtered.append(ln)
     return filtered
@@ -2473,22 +2915,107 @@ def _filter_out_sticky(lines: List[str]) -> List[str]:
 def _normalize_command(cmd: str) -> str:
     return re.sub(r"\s+", " ", cmd.strip().lower()) if cmd.strip() else ""
 
-def _ensure_security_basics(commands: List[str]) -> None:
-    required = [
-        " switchport port-security mac-address sticky",
-        " switchport port-security",
-        " spanning-tree portfast",
-    ]
+def _ensure_security_basics(commands: List[str], *, enable_port_security: bool = True) -> None:
     existing = {
         _normalize_command(cmd)
         for cmd in commands
         if cmd and not cmd.strip().startswith("!")
     }
-    for line in required:
-        norm = _normalize_command(line)
-        if norm and norm not in existing:
-            commands.append(line)
-            existing.add(norm)
+
+    if enable_port_security:
+        required = [
+            " switchport port-security mac-address sticky",
+            " switchport port-security",
+            " spanning-tree portfast",
+        ]
+        for line in required:
+            norm = _normalize_command(line)
+            if norm and norm not in existing:
+                commands.append(line)
+                existing.add(norm)
+
+
+def _collect_switch_locations(
+    rows: List[List[str]],
+    group_tag: str,
+    host_metadata: Dict[str, Dict[str, Any]],
+) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for row in rows:
+        if row[-1] != group_tag:
+            continue
+        src_host = row[0]
+        if not src_host or str(src_host).upper() == "LIBRE":
+            continue
+        meta = host_metadata.get(src_host)
+        if not meta:
+            continue
+        location = meta.get("snmp_location")
+        if location and row[5] not in mapping:
+            mapping[row[5]] = location
+    return mapping
+
+
+def _collect_switch_contacts(
+    rows: List[List[str]],
+    group_tag: str,
+    host_metadata: Dict[str, Dict[str, Any]],
+) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for row in rows:
+        if row[-1] != group_tag:
+            continue
+        src_host = row[0]
+        if not src_host or str(src_host).upper() == "LIBRE":
+            continue
+        meta = host_metadata.get(src_host)
+        if not meta:
+            continue
+        contact = meta.get("snmp_contact") or DEFAULT_SNMP_CONTACT
+        if row[5] not in mapping:
+            mapping[row[5]] = contact
+    return mapping
+
+
+def _collect_group_vlans(rows: List[List[str]], group_tag: str) -> Set[str]:
+    vlans: Set[str] = set()
+    for row in rows:
+        if row[-1] != group_tag or row[0] == "LIBRE":
+            continue
+        vlan = row[6]
+        if vlan and vlan.isdigit():
+            vlans.add(vlan)
+        vlans.update(_vlans_from_tag_string(row[8]))
+    return {v for v in vlans if v and v.isdigit()}
+
+
+def _poe_uplink_interfaces() -> List[Tuple[str, str]]:
+    """Return the fixed uplink members for the POE stack (CORE_1/CORE_2)."""
+    if not POE_MEMBER_METADATA:
+        return []
+
+    first_member = min(POE_MEMBER_METADATA.keys())
+    return [
+        (f"TwentyFiveGigE{first_member}/1/1", "Interfaz Uplink CORE_1"),
+        (f"TwentyFiveGigE{first_member}/1/2", "Interfaz Uplink CORE_2"),
+    ]
+
+
+def _ambar_t_uplink_interfaces() -> List[Tuple[str, str]]:
+    """Uplinks for AMBAR-T stacks (fixed numbering)."""
+    return [
+        ("TwentyFiveGigE1/1/2", "Interfaz Uplink CORE_1"),
+        ("TwentyFiveGigE2/1/2", "Interfaz Uplink CORE_2"),
+    ]
+
+
+def _uca_uplink_interfaces() -> List[Tuple[str, str]]:
+    """Uplinks for UCA stacks (fixed numbering)."""
+    return [
+        ("Twe1/1/1", "Interfaz Uplink CORE_1"),
+        ("Twe1/1/2", "Interfaz Uplink CORE_2"),
+    ]
+
 
 def _stack_interface_sort_key(iface: str) -> Tuple[int, Tuple[int, ...], int, str]:
     nums = [int(n) for n in re.findall(r"\d+", iface)]
@@ -2500,6 +3027,70 @@ def _stack_interface_sort_key(iface: str) -> Tuple[int, Tuple[int, ...], int, st
     return (member, mid, port, iface)
 
 
+def _build_management_vlan_lines(
+    rows_sorted: List[List[str]],
+    iface_cfgs: Dict[Tuple[str, str], List[str]],
+    host_metadata: Optional[Dict[str, Dict[str, Any]]],
+    *,
+    iface_name: str = "Vlan623",
+    fallback_ip_line: Optional[str] = " ip address 10.192.130.35 255.255.254.0",
+    default_gateway: Optional[str] = None,
+) -> List[str]:
+    if not rows_sorted:
+        return []
+
+    metadata_map = host_metadata or {}
+    metadata: Dict[str, Any] = {}
+    mgmt_block: Optional[List[str]] = None
+
+    for row in rows_sorted:
+        src_host = row[0]
+        if not src_host or str(src_host).upper() == "LIBRE":
+            continue
+        metadata = metadata_map.get(src_host, {})
+        mgmt_block = iface_cfgs.get((src_host, iface_name))
+        if mgmt_block:
+            break
+
+    lines: List[str] = [f"interface {iface_name}"]
+    iface_lines: List[str] = []
+
+    if mgmt_block:
+        for ln in mgmt_block:
+            stripped = ln.rstrip("\n")
+            if re.match(r"^\s*interface\b", stripped, re.IGNORECASE):
+                continue
+            iface_lines.append(stripped)
+
+    if fallback_ip_line and not any(
+        re.match(r"^\s*ip\s+address\b", ln, re.IGNORECASE) for ln in iface_lines
+    ):
+        iface_lines.insert(0, fallback_ip_line)
+
+    has_shutdown = any(re.match(r"^\s*shutdown\b", ln, re.IGNORECASE) for ln in iface_lines)
+    has_no_shutdown = any(re.match(r"^\s*no\s+shutdown\b", ln, re.IGNORECASE) for ln in iface_lines)
+    if not has_shutdown and not has_no_shutdown:
+        iface_lines.append(" no shutdown")
+
+    lines.extend(iface_lines)
+    lines.append("!")
+
+    mgmt_if = iface_name
+    default_gw = metadata.get("ip_default_gateway") if metadata else None
+    if not default_gw:
+        if default_gateway:
+            default_gw = default_gateway
+        else:
+            default_gw = "10.192.130.254"
+
+    lines.append(f"ip tftp source-interface {mgmt_if}")
+    lines.append(f"ip http client source-interface {mgmt_if}")
+    lines.append(f"ntp source {mgmt_if}")
+    lines.append(f"ip default-gateway {default_gw}")
+
+    return lines
+
+
 def export_config_with_templates(
     rows: List[List[str]],
     out_dir: str,
@@ -2509,6 +3100,7 @@ def export_config_with_templates(
     hostname_ambar: str,
     hostname_uca: str,
     include_vlan_623: bool = False,
+    host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     out_map = {
@@ -2537,10 +3129,26 @@ def export_config_with_templates(
             used_vlans.add(m_voice.group(1))
         used_vlans.update(_vlans_from_tag_string(r[8]))
 
+    if which == "POE":
+        used_vlans.add("623")
+        if include_vlan_623:
+            used_vlans.update(_collect_group_vlans(rows, "UCA"))
+
+    if which == "AMBAR_T":
+        used_vlans.add("623")
+
     if which == "UCA" and include_vlan_623:
         used_vlans.add("2230")
+        used_vlans.add("623")
 
     forced_hostname = hostname_ambar if which in ("POE", "AMBAR_T") else hostname_uca
+    switch_locations: Dict[str, str] = {}
+    switch_contacts: Dict[str, str] = {}
+    if host_metadata:
+        switch_locations = _collect_switch_locations(rows, which, host_metadata)
+        switch_contacts = _collect_switch_contacts(rows, which, host_metadata)
+
+    core_lines: List[str] = []
 
     with open(txt, "w", encoding="utf-8") as f:
         f.write(f"!\n! Configuración generada ({which})\n!\n")
@@ -2552,8 +3160,10 @@ def export_config_with_templates(
         )
         f.write("! ------------------------------------------------------------\n")
 
-        if used_vlans:
-            for vlan in sorted(used_vlans, key=int):
+        cleaned_vlans = {v for v in used_vlans if v and v.isdigit()}
+
+        if cleaned_vlans:
+            for vlan in sorted(cleaned_vlans, key=int):
                 f.write(f"vlan {vlan}\n")
                 vlan_name = VLAN_NAME_MAP.get(vlan)
                 if vlan_name:
@@ -2565,6 +3175,110 @@ def export_config_with_templates(
             f.write("interface Vlan2230\n")
             f.write(" shutdown\n")
             f.write("!\n")
+            mgmt_lines = _build_management_vlan_lines(
+                rows_sorted,
+                iface_cfgs,
+                host_metadata,
+                default_gateway="10.192.129.254",
+            )
+            for line in mgmt_lines:
+                f.write(line + "\n")
+
+        if which == "UCA":
+            uca_allowed_set = {v for v in cleaned_vlans if v != "623"}
+            try:
+                uca_allowed = sorted(uca_allowed_set, key=int)
+            except ValueError:
+                uca_allowed = sorted(uca_allowed_set)
+            if uca_allowed:
+                for uplink_if, desc in _uca_uplink_interfaces():
+                    core_lines.extend(
+                        [
+                            f"interface {uplink_if}",
+                            f" description {desc}",
+                            " switchport mode trunk",
+                            " channel-group 1 mode active",
+                            "!",
+                        ]
+                    )
+                core_lines.extend(
+                    [
+                        "interface Port-channel1",
+                        " description Port-channel 1 Conexion Core",
+                        f" switchport trunk allowed vlan {','.join(uca_allowed)}",
+                        " switchport mode trunk",
+                        "!",
+                    ]
+                )
+
+        if which == "POE":
+            mgmt_lines = _build_management_vlan_lines(
+                rows_sorted,
+                iface_cfgs,
+                host_metadata,
+                default_gateway="10.192.130.254",
+            )
+            for line in mgmt_lines:
+                f.write(line + "\n")
+
+            poe_allowed = sorted(cleaned_vlans, key=int)
+            uplink_defs = _poe_uplink_interfaces()
+            if poe_allowed and uplink_defs:
+                for uplink_if, desc in uplink_defs:
+                    core_lines.extend(
+                        [
+                            f"interface {uplink_if}",
+                            f" description {desc}",
+                            " switchport mode trunk",
+                            " channel-group 1 mode active",
+                            "!",
+                        ]
+                    )
+                core_lines.extend(
+                    [
+                        "interface Port-channel1",
+                        " description Port-channel 1 Conexion Core",
+                        f" switchport trunk allowed vlan {','.join(poe_allowed)}",
+                        " switchport mode trunk",
+                        "!",
+                    ]
+                )
+
+        if which == "AMBAR_T":
+            mgmt_lines = _build_management_vlan_lines(
+                rows_sorted,
+                iface_cfgs,
+                host_metadata,
+                default_gateway="10.192.130.254",
+            )
+            for line in mgmt_lines:
+                f.write(line + "\n")
+
+            try:
+                ambar_allowed = sorted(cleaned_vlans, key=int)
+            except ValueError:
+                ambar_allowed = sorted(cleaned_vlans)
+            uplink_defs = _ambar_t_uplink_interfaces()
+            if ambar_allowed and uplink_defs:
+                for uplink_if, desc in uplink_defs:
+                    core_lines.extend(
+                        [
+                            f"interface {uplink_if}",
+                            f" description {desc}",
+                            " switchport mode trunk",
+                            " channel-group 1 mode active",
+                            "!",
+                        ]
+                    )
+                core_lines.extend(
+                    [
+                        "interface Port-channel1",
+                        " description Port-channel 1 Conexion Core",
+                        f" switchport trunk allowed vlan {','.join(ambar_allowed)}",
+                        " switchport mode trunk",
+                        "!",
+                    ]
+                )
         f.write("! ------------------------------------------------------------\n")
 
         if not rows_by_switch:
@@ -2572,6 +3286,12 @@ def export_config_with_templates(
             return txt
 
         for sw_new in sorted(rows_by_switch):
+            contact_line = switch_contacts.get(sw_new, DEFAULT_SNMP_CONTACT)
+            f.write(f"snmp-server contact {contact_line}\n")
+            location = switch_locations.get(sw_new)
+            if location:
+                f.write(f"snmp-server location {location}\n")
+            f.write("!\n")
             f.write(f"! Interfaces para {sw_new}\n")
             for sw_act, if_act, desc_act, if_new, desc_new, _, vlan, mode, tags, mac, _ in rows_by_switch[sw_new]:
                 block = iface_cfgs.get((sw_act, if_act))
@@ -2614,7 +3334,17 @@ def export_config_with_templates(
                         if all(not _normalize_command(cmd).startswith("switchport trunk allowed vlan") for cmd in commands):
                             commands.append(f" switchport trunk allowed vlan {allowed_str}")
 
-                _ensure_security_basics(commands)
+                    disallowed = {
+                        "switchport port-security mac-address sticky",
+                        "switchport port-security",
+                        "spanning-tree portfast",
+                    }
+                    commands = [
+                        cmd for cmd in commands
+                        if _normalize_command(cmd) not in disallowed
+                    ]
+
+                _ensure_security_basics(commands, enable_port_security=(mode_lc != "trunk"))
 
                 m_voice = re.search(r"VOICE=(\d+)", tags or "")
                 if m_voice:
@@ -2629,7 +3359,16 @@ def export_config_with_templates(
                         f.write(cmd + "\n")
                 f.write("!\n")
 
-            f.write("!\nend\n!\n")
+        if core_lines:
+            f.write("! --- TRONCALES CORE ---\n")
+            for line in core_lines:
+                if line.endswith("\n"):
+                    f.write(line)
+                else:
+                    f.write(line + "\n")
+            f.write("! ------------------------------------------------------------\n")
+
+        f.write("!\nend\n!\n")
 
     return txt
 
@@ -2640,6 +3379,7 @@ def export_config_video(
     iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
     hostname_video: str,
+    host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     txt = os.path.join(out_dir, f"config_video_{ts}.txt")
@@ -2650,9 +3390,25 @@ def export_config_video(
     for row in rows_sorted:
         rows_by_switch.setdefault(row[5], []).append(row)
 
+    metadata_map = host_metadata or {}
+    base_metadata: Dict[str, Any] = {}
+    if rows_sorted:
+        first_host = rows_sorted[0][0]
+        base_metadata = metadata_map.get(first_host, {})
+
+    base_lines = _video_extra_base_lines(base_metadata)
+
+    switch_locations = _collect_switch_locations(rows, "VIDEO", metadata_map)
+    switch_contacts = _collect_switch_contacts(rows, "VIDEO", metadata_map)
+
     with open(txt, "w", encoding="utf-8") as f:
         f.write("!\n! Configuración generada (VIDEO)\n!\n")
-        _emit_base_template(f, forced_hostname=hostname_video, which="VIDEO")
+        f.write(f"hostname {hostname_video}\n")
+        for ln in base_lines:
+            if ln.endswith("\n"):
+                f.write(ln)
+            else:
+                f.write(ln + "\n")
         f.write("! ------------------------------------------------------------\n")
 
         if not rows_by_switch:
@@ -2660,6 +3416,12 @@ def export_config_video(
             return txt
 
         for sw_new in sorted(rows_by_switch):
+            contact_line = DEFAULT_SNMP_CONTACT
+            f.write(f"snmp-server contact {contact_line}\n")
+            location = switch_locations.get(sw_new)
+            if location:
+                f.write(f"snmp-server location {location}\n")
+            f.write("!\n")
             f.write(f"! Interfaces para {sw_new}\n")
             for sw_act, if_act, desc_act, if_new, desc_new, _sw_name, _vlan, _mode, _tags, _mac, _grupo in rows_by_switch[sw_new]:
                 block = iface_cfgs.get((sw_act, if_act))
@@ -2801,12 +3563,26 @@ if __name__ == "__main__":
             continue
         video_inputs.append(picked)
 
-    wifi_items, voip_items, uca_items, ambar_other_items, trunk_items, all_iface_cfgs = build_inventory_from_logs(inputs)
+    (
+        wifi_items,
+        voip_items,
+        uca_items,
+        ambar_other_items,
+        trunk_items,
+        all_iface_cfgs,
+        host_metadata,
+    ) = build_inventory_from_logs(inputs)
 
     poe_rows, ambar_overflow = make_mapping_poe(wifi_items, voip_items, ambar_other_items, trunk_items)
     ambar_t_rows = make_mapping_ambar_t(ambar_overflow) if ambar_overflow else []
-    uca_rows = make_mapping_uca(uca_items)
-    video_rows, video_iface_cfgs = make_mapping_video(video_inputs) if video_inputs else ([], {})
+    uca_reserved_tail = UCA_RESERVED_TAIL_FREE + (1 if include_vlan_623 else 0)
+    uca_rows = make_mapping_uca(uca_items, reserved_tail=uca_reserved_tail)
+    _apply_uca_management_trunks(uca_rows, include_mgmt_vlan=include_vlan_623)
+    if video_inputs:
+        video_rows, video_iface_cfgs, video_metadata = make_mapping_video(video_inputs)
+        host_metadata.update(video_metadata)
+    else:
+        video_rows, video_iface_cfgs = [], {}
 
     print("\nIntroduce los hostnames base para las plantillas:")
     hostname_ambar = input("Hostname para switches AMBAR (POE y AMBAR_T): ").strip() or "AMBAR-SW"
@@ -2844,22 +3620,26 @@ if __name__ == "__main__":
         all_rows, out_dir, which="POE", iface_cfgs=all_iface_cfgs,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
+        host_metadata=host_metadata,
     )
     cfg_amb_t = export_config_with_templates(
         all_rows, out_dir, which="AMBAR_T", iface_cfgs=all_iface_cfgs,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
+        host_metadata=host_metadata,
     ) if ambar_t_rows else None
     cfg_uca_t = export_config_with_templates(
         all_rows, out_dir, which="UCA", iface_cfgs=all_iface_cfgs,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
+        host_metadata=host_metadata,
     ) if uca_rows else None
     combined_cfgs = {**all_iface_cfgs, **video_iface_cfgs}
     cfg_video = export_config_video(
         all_rows, out_dir,
         iface_cfgs=combined_cfgs,
         hostname_video=hostname_video,
+        host_metadata=host_metadata,
     ) if video_rows else None
 
     print("\n¡Hecho!")
