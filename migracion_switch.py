@@ -1510,8 +1510,31 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         }
 
     total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
+
     if core_slots > total_usable:
-        raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP/AMBAR/TRUNK configurados")
+        deficit = core_slots - total_usable
+        if tail_free > 0:
+            reclaim = min(deficit, tail_free)
+            tail_free -= reclaim
+            deficit -= reclaim
+        if deficit > 0 and reserve_after_voip > 0:
+            reclaim = min(deficit, reserve_after_voip)
+            reserve_after_voip -= reclaim
+            deficit -= reclaim
+        if deficit > 0 and reserve_after_wifi > 0:
+            reclaim = min(deficit, reserve_after_wifi)
+            reserve_after_wifi -= reclaim
+            deficit -= reclaim
+        core_slots = (
+            len(wifi_items)
+            + reserve_after_wifi
+            + len(voip_items)
+            + reserve_after_voip
+            + len(trunk_items)
+            + tail_free
+        )
+        if deficit > 0 or core_slots > total_usable:
+            raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP/AMBAR/TRUNK configurados")
 
     # Particiones y orden
     wifi_primary = [it for it in wifi_items if not it.get("avoid_uxm")]
