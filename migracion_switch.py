@@ -1565,59 +1565,28 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
                 "Capacidad POE insuficiente para respetar las restricciones de ubicación"
             )
 
-        break
-
-    sequence = []
-    sequence.extend(("ITEM", it) for it in wifi_primary)
-    sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
-    sequence.extend(("ITEM", it) for it in voip_primary)
-    sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
-    sequence.extend(("ITEM", it) for it in ambar_primary)
-    forced_to_new_member = False
-    if ambar_avoid:
-        sequence.append(("FORCE_NEXT", None))
-        forced_to_new_member = True
-        sequence.extend(("ITEM", it) for it in ambar_avoid)
-    sequence.extend(("ITEM", it) for it in trunk_primary)
-    if avoid_sequence:
-        if not forced_to_new_member:
+        sequence = []
+        sequence.extend(("ITEM", it) for it in wifi_primary)
+        sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
+        sequence.extend(("ITEM", it) for it in voip_primary)
+        sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
+        sequence.extend(("ITEM", it) for it in ambar_primary)
+        forced_to_new_member = False
+        if ambar_avoid:
             sequence.append(("FORCE_NEXT", None))
             forced_to_new_member = True
-        sequence.extend(("ITEM", it) for it in avoid_sequence)
-    sequence.extend(("LIBRE", None) for _ in range(tail_free_effective))
+            sequence.extend(("ITEM", it) for it in ambar_avoid)
+        sequence.extend(("ITEM", it) for it in trunk_primary)
+        if avoid_sequence:
+            if not forced_to_new_member:
+                sequence.append(("FORCE_NEXT", None))
+                forced_to_new_member = True
+            sequence.extend(("ITEM", it) for it in avoid_sequence)
+        sequence.extend(("LIBRE", None) for _ in range(tail_free_effective))
 
-    rows: List[List[str]] = []
-    member_index = 1
-    member_info = POE_MEMBER_METADATA[member_index]
-    usable_capacity = int(member_info["usable_capacity"])
-    total_ports = int(member_info["capacity"])
-    formatter = _poe_interface_formatter(member_index)
-    sw_name = str(member_info["sw_name"])
-    idx = 1
-
-    def flush_current(start_idx: int) -> None:
-        if usable_capacity > 0 and start_idx <= usable_capacity:
-            _pad_member_with_libres(rows, formatter, sw_name, start_idx, usable_capacity, "POE")
-        _pad_member_with_libres(rows, formatter, sw_name, usable_capacity + 1, total_ports, "POE")
-
-    for kind, payload in sequence:
-        if kind == "FORCE_NEXT":
-            flush_current(idx)
-            member_index += 1
-            if member_index > len(capacities):
-                raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
-            member_info = POE_MEMBER_METADATA[member_index]
-            usable_capacity = int(member_info["usable_capacity"])
-            total_ports = int(member_info["capacity"])
-            formatter = _poe_interface_formatter(member_index)
-            sw_name = str(member_info["sw_name"])
-            idx = 1
-            continue
-        while usable_capacity <= 0 or idx > usable_capacity:
-            flush_current(idx)
-            member_index += 1
-            if member_index > len(capacities):
-                raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
+        def _try_build_rows() -> Optional[List[List[str]]]:
+            rows: List[List[str]] = []
+            member_index = 1
             member_info = POE_MEMBER_METADATA[member_index]
             usable_capacity = int(member_info["usable_capacity"])
             total_ports = int(member_info["capacity"])
@@ -1625,23 +1594,65 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
             sw_name = str(member_info["sw_name"])
             idx = 1
 
-        if kind == "ITEM":
-            rows.append(_mk_row(formatter, idx, payload, sw_name, "POE"))
-        else:
-            rows.append(_libre_row(formatter, idx, sw_name, "POE"))
-        idx += 1
+            def flush_current(start_idx: int) -> None:
+                if usable_capacity > 0 and start_idx <= usable_capacity:
+                    _pad_member_with_libres(
+                        rows, formatter, sw_name, start_idx, usable_capacity, "POE"
+                    )
+                _pad_member_with_libres(
+                    rows, formatter, sw_name, usable_capacity + 1, total_ports, "POE"
+                )
 
-    flush_current(idx)
-    while member_index < len(capacities):
-        member_index += 1
-        member_info = POE_MEMBER_METADATA[member_index]
-        usable_capacity = int(member_info["usable_capacity"])
-        total_ports = int(member_info["capacity"])
-        formatter = _poe_interface_formatter(member_index)
-        sw_name = str(member_info["sw_name"])
-        flush_current(1)
+            for kind, payload in sequence:
+                if kind == "FORCE_NEXT":
+                    flush_current(idx)
+                    member_index += 1
+                    if member_index > len(capacities):
+                        return None
+                    member_info = POE_MEMBER_METADATA[member_index]
+                    usable_capacity = int(member_info["usable_capacity"])
+                    total_ports = int(member_info["capacity"])
+                    formatter = _poe_interface_formatter(member_index)
+                    sw_name = str(member_info["sw_name"])
+                    idx = 1
+                    continue
+                while usable_capacity <= 0 or idx > usable_capacity:
+                    flush_current(idx)
+                    member_index += 1
+                    if member_index > len(capacities):
+                        return None
+                    member_info = POE_MEMBER_METADATA[member_index]
+                    usable_capacity = int(member_info["usable_capacity"])
+                    total_ports = int(member_info["capacity"])
+                    formatter = _poe_interface_formatter(member_index)
+                    sw_name = str(member_info["sw_name"])
+                    idx = 1
 
-    return rows, ambar_overflow
+                if kind == "ITEM":
+                    rows.append(_mk_row(formatter, idx, payload, sw_name, "POE"))
+                else:
+                    rows.append(_libre_row(formatter, idx, sw_name, "POE"))
+                idx += 1
+
+            flush_current(idx)
+            while member_index < len(capacities):
+                member_index += 1
+                member_info = POE_MEMBER_METADATA[member_index]
+                usable_capacity = int(member_info["usable_capacity"])
+                total_ports = int(member_info["capacity"])
+                formatter = _poe_interface_formatter(member_index)
+                sw_name = str(member_info["sw_name"])
+                flush_current(1)
+
+            return rows
+
+        built_rows = _try_build_rows()
+        if built_rows is None:
+            if _append_capacity(1):
+                continue
+            raise RuntimeError("Capacidad POE insuficiente para la secuencia generada")
+
+        return built_rows, ambar_overflow
 
 def _ambar_t_switch_capacities(required_ports: int) -> List[int]:
     capacities: List[int] = []
