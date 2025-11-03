@@ -1474,70 +1474,98 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
             total += usable
         return meta, total
 
-    meta_info, total_usable = _build_meta(capacities)
-
-    while len(capacities) < POE_MAX_STACK_MEMBERS:
-        usable_for_ambar = max(total_usable - base_fixed, 0)
-        if usable_for_ambar >= len(ambar_others):
-            break
-        remaining_needed = len(ambar_others) - usable_for_ambar
-        if remaining_needed <= 0:
-            break
-        next_capacity = (
-            POE_MAX_PORTS
-            if (len(capacities) + 1) < POE_MAX_STACK_MEMBERS or remaining_needed > POE_AUX_FINAL_PORTS
-            else POE_AUX_FINAL_PORTS
-        )
+    def _append_capacity(remaining_needed: int) -> bool:
+        if len(capacities) >= POE_MAX_STACK_MEMBERS:
+            return False
+        next_index = len(capacities) + 1
+        if next_index < POE_MAX_STACK_MEMBERS:
+            capacities.append(POE_MAX_PORTS)
+            return True
+        usable_aux = max(POE_AUX_FINAL_PORTS - 2, 0)
+        next_capacity = POE_MAX_PORTS if remaining_needed > usable_aux else POE_AUX_FINAL_PORTS
         capacities.append(next_capacity)
+        return True
+
+    while True:
         meta_info, total_usable = _build_meta(capacities)
 
-    POE_MEMBER_METADATA.clear()
-    wifi_counter = 0
-    poe_counter = 0
-    for info in meta_info:
-        member_index = info["index"]
-        capacity = info["capacity"]
-        if info["type"] == "wifi":
-            wifi_counter += 1
-            sw_name = _format_numbered_name(NEW_SWITCH_WIFI_NAME, wifi_counter)
-        else:
-            poe_counter += 1
-            sw_name = _format_numbered_name(NEW_SWITCH_POE_NAME, poe_counter)
-        POE_MEMBER_METADATA[member_index] = {
-            "type": info["type"],
-            "sw_name": sw_name,
-            "capacity": capacity,
-            "usable_capacity": max(capacity - 2, 0),
-        }
+        usable_for_ambar_probe = max(total_usable - base_fixed, 0)
+        if usable_for_ambar_probe < len(ambar_others):
+            remaining_needed = len(ambar_others) - usable_for_ambar_probe
+            if remaining_needed > 0 and _append_capacity(remaining_needed):
+                continue
+            if remaining_needed > 0:
+                raise RuntimeError("Capacidad POE insuficiente para AMBAR configurados")
 
-    total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
-    if base_fixed > total_usable:
-        raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP configurados")
+        if base_fixed > total_usable:
+            shortfall = base_fixed - total_usable
+            if _append_capacity(shortfall):
+                continue
+            raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP configurados")
 
-    tail_free_effective = tail_free if tail_free > 0 else 0
-    usable_for_ambar = max(total_usable - base_fixed, 0)
-    ambar_for_poe = ambar_others[:usable_for_ambar]
-    ambar_overflow = ambar_others[usable_for_ambar:]
+        POE_MEMBER_METADATA.clear()
+        wifi_counter = 0
+        poe_counter = 0
+        for info in meta_info:
+            member_index = info["index"]
+            capacity = info["capacity"]
+            if info["type"] == "wifi":
+                wifi_counter += 1
+                sw_name = _format_numbered_name(NEW_SWITCH_WIFI_NAME, wifi_counter)
+            else:
+                poe_counter += 1
+                sw_name = _format_numbered_name(NEW_SWITCH_POE_NAME, poe_counter)
+            POE_MEMBER_METADATA[member_index] = {
+                "type": info["type"],
+                "sw_name": sw_name,
+                "capacity": capacity,
+                "usable_capacity": max(capacity - 2, 0),
+            }
 
-    wifi_primary = [it for it in wifi_items if not it.get("avoid_uxm")]
-    wifi_avoid = [it for it in wifi_items if it.get("avoid_uxm")]
-    voip_primary = [it for it in voip_items if not it.get("avoid_uxm")]
-    voip_avoid = [it for it in voip_items if it.get("avoid_uxm")]
-    ambar_primary: List[Dict[str, Any]] = []
-    ambar_avoid: List[Dict[str, Any]] = []
-    for it in ambar_for_poe:
-        if it.get("avoid_uxm"):
-            ambar_avoid.append(it)
-        else:
-            ambar_primary.append(it)
+        total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
+        tail_free_effective = tail_free if tail_free > 0 else 0
+        usable_for_ambar = max(total_usable - base_fixed, 0)
+        ambar_for_poe = ambar_others[:usable_for_ambar]
+        ambar_overflow = ambar_others[usable_for_ambar:]
 
-    trunk_primary = [it for it in trunk_items if not it.get("avoid_uxm")]
-    trunk_avoid = [it for it in trunk_items if it.get("avoid_uxm")]
+        wifi_primary = [it for it in wifi_items if not it.get("avoid_uxm")]
+        wifi_avoid = [it for it in wifi_items if it.get("avoid_uxm")]
+        voip_primary = [it for it in voip_items if not it.get("avoid_uxm")]
+        voip_avoid = [it for it in voip_items if it.get("avoid_uxm")]
+        ambar_primary: List[Dict[str, Any]] = []
+        ambar_avoid: List[Dict[str, Any]] = []
+        for it in ambar_for_poe:
+            if it.get("avoid_uxm"):
+                ambar_avoid.append(it)
+            else:
+                ambar_primary.append(it)
 
-    avoid_sequence: List[Dict[str, Any]] = []
-    avoid_sequence.extend(wifi_avoid)
-    avoid_sequence.extend(voip_avoid)
-    avoid_sequence.extend(trunk_avoid)
+        trunk_primary = [it for it in trunk_items if not it.get("avoid_uxm")]
+        trunk_avoid = [it for it in trunk_items if it.get("avoid_uxm")]
+
+        avoid_sequence: List[Dict[str, Any]] = []
+        avoid_sequence.extend(wifi_avoid)
+        avoid_sequence.extend(voip_avoid)
+        avoid_sequence.extend(trunk_avoid)
+
+        forced_transitions = 1 if ambar_avoid else 0
+        if avoid_sequence and not ambar_avoid:
+            forced_transitions += 1
+        required_members = 1 + forced_transitions
+        if required_members > len(capacities):
+            extra_members = required_members - len(capacities)
+            appended_any = False
+            for _ in range(extra_members):
+                appended_any = _append_capacity(1)
+                if not appended_any:
+                    break
+            if appended_any:
+                continue
+            raise RuntimeError(
+                "Capacidad POE insuficiente para respetar las restricciones de ubicación"
+            )
+
+        break
 
     sequence = []
     sequence.extend(("ITEM", it) for it in wifi_primary)
