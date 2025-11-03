@@ -1545,12 +1545,16 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     sequence.extend(("ITEM", it) for it in voip_primary)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
     sequence.extend(("ITEM", it) for it in ambar_primary)
+    forced_to_new_member = False
     if ambar_avoid:
         sequence.append(("FORCE_NEXT", None))
+        forced_to_new_member = True
         sequence.extend(("ITEM", it) for it in ambar_avoid)
     sequence.extend(("ITEM", it) for it in trunk_primary)
     if avoid_sequence:
-        sequence.append(("FORCE_NEXT", None))
+        if not forced_to_new_member:
+            sequence.append(("FORCE_NEXT", None))
+            forced_to_new_member = True
         sequence.extend(("ITEM", it) for it in avoid_sequence)
     sequence.extend(("LIBRE", None) for _ in range(tail_free_effective))
 
