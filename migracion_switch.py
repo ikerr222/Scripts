@@ -1818,28 +1818,69 @@ def _ensure_poe_downlink_trunk(
     allowed_str = ",".join(ordered)
     tag_str = f"VLANS={allowed_str};ORIGIN=TRUNK"
 
-    for idx in range(len(poe_rows) - 1, -1, -1):
-        row = poe_rows[idx]
+    last_trunk_idx: Optional[int] = None
+    last_trunk_sw: Optional[str] = None
+    last_trunk_port: Optional[int] = None
+
+    for idx, row in enumerate(poe_rows):
         if row[-1] != "POE":
             continue
-        if str(row[0]).upper() != "LIBRE":
+        if str(row[0]).upper() != "TRUNK":
             continue
-        iface_new = row[3]
-        sw_name = row[5]
-        poe_rows[idx] = [
-            "TRUNK",
-            "TRUNK",
-            "TRUNK UCA",
-            iface_new,
-            "TRUNK UCA",
-            sw_name,
-            "trunk",
-            "trunk",
-            tag_str,
-            "N/A",
-            "POE",
-        ]
+        last_trunk_idx = idx
+        last_trunk_sw = row[5]
+        last_trunk_port = _extract_if_index(row[3])
+
+    candidate_idx: Optional[int] = None
+    if last_trunk_idx is not None and last_trunk_sw is not None:
+        best_port: Optional[int] = None
+        best_idx: Optional[int] = None
+        for idx, row in enumerate(poe_rows):
+            if row[-1] != "POE":
+                continue
+            if str(row[0]).upper() != "LIBRE":
+                continue
+            if row[5] != last_trunk_sw:
+                continue
+            port = _extract_if_index(row[3])
+            if port is None:
+                continue
+            if last_trunk_port is not None and port <= last_trunk_port:
+                continue
+            if best_port is None or port < best_port or (port == best_port and (best_idx is None or idx < best_idx)):
+                best_port = port
+                best_idx = idx
+        if best_idx is not None:
+            candidate_idx = best_idx
+
+    if candidate_idx is None:
+        for idx in range(len(poe_rows) - 1, -1, -1):
+            row = poe_rows[idx]
+            if row[-1] != "POE":
+                continue
+            if str(row[0]).upper() != "LIBRE":
+                continue
+            candidate_idx = idx
+            break
+
+    if candidate_idx is None:
         return
+
+    iface_new = poe_rows[candidate_idx][3]
+    sw_name = poe_rows[candidate_idx][5]
+    poe_rows[candidate_idx] = [
+        "TRUNK",
+        "TRUNK",
+        "TRUNK UCA",
+        iface_new,
+        "TRUNK UCA",
+        sw_name,
+        "trunk",
+        "trunk",
+        tag_str,
+        "N/A",
+        "POE",
+    ]
 
 
 def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tuple[str, str], List[str]], Dict[str, Dict[str, Any]]]:
