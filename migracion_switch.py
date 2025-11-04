@@ -702,6 +702,7 @@ VOICE_VLAN_RE  = re.compile(r"^\s*switchport\s+voice\s+vlan\s+(\d+)", re.IGNOREC
 SNMP_LOCATION_RE         = re.compile(r"^\s*snmp-server\s+location\s+(.+)$", re.IGNORECASE)
 SNMP_CONTACT_RE          = re.compile(r"^\s*snmp-server\s+contact\s+(.+)$", re.IGNORECASE)
 IP_DEFAULT_GATEWAY_RE    = re.compile(r"^\s*ip\s+default-gateway\s+(\S+)", re.IGNORECASE)
+DEFAULT_GATEWAY_LINE_RE  = re.compile(r"^(\s*ip\s+default-gateway\s+)(\S+)(.*)$", re.IGNORECASE)
 IP_PIM_REGISTER_RE       = re.compile(r"^\s*ip\s+pim\s+register-source\s+(\S+)", re.IGNORECASE)
 IP_PIM_RP_RE             = re.compile(r"^\s*ip\s+pim\s+rp-address\s+.+$", re.IGNORECASE)
 IP_TFTP_SOURCE_RE        = re.compile(r"^\s*ip\s+tftp\s+source-interface\s+(\S+)", re.IGNORECASE)
@@ -2989,7 +2990,19 @@ def _emit_base_template(
     which: str,
     *,
     include_vlan_623: bool = False,
+    default_gateway_override: Optional[str] = None,
 ):
+    def _override_default_gateway(line: str) -> str:
+        if not default_gateway_override:
+            return line
+
+        match = DEFAULT_GATEWAY_LINE_RE.match(line)
+        if not match:
+            return line
+
+        prefix, _, suffix = match.groups()
+        return f"{prefix}{default_gateway_override}{suffix}"
+
     def _uca_vlan623_override(line: str) -> str:
         stripped = line.strip()
         lower = stripped.lower()
@@ -3024,7 +3037,8 @@ def _emit_base_template(
     for ln in base_lines:
         if BASE_HOSTNAME_RE.match(ln):
             continue
-        f.write(ln + ("\n" if not ln.endswith("\n") else ""))
+        rewritten = _override_default_gateway(ln)
+        f.write(rewritten + ("\n" if not rewritten.endswith("\n") else ""))
 
     if which in ("POE", "AMBAR_T"):
         extra_lines = _read_template_file(AMBAR_EXTRA_TEMPLATE_PATH)
@@ -3033,7 +3047,8 @@ def _emit_base_template(
         if extra_lines:
             f.write("!\n! === CONFIG BASE AMBAR ADICIONAL ===\n")
             for ln in extra_lines:
-                f.write(ln + ("\n" if not ln.endswith("\n") else ""))
+                rewritten = _override_default_gateway(ln)
+                f.write(rewritten + ("\n" if not rewritten.endswith("\n") else ""))
     elif which == "UCA":
         extra_lines = _read_template_file(UCA_EXTRA_TEMPLATE_PATH)
         if not extra_lines:
@@ -3058,7 +3073,8 @@ def _emit_base_template(
                     if include_vlan_623
                     else ln
                 )
-                f.write(out_line + ("\n" if not out_line.endswith("\n") else ""))
+                rewritten = _override_default_gateway(out_line)
+                f.write(rewritten + ("\n" if not rewritten.endswith("\n") else ""))
 
 
 def _filter_out_sticky(lines: List[str]) -> List[str]:
@@ -3275,6 +3291,7 @@ def export_config_with_templates(
     iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
     switch_number: Union[str, int],
+    is_less_than_200: bool,
     hostname_ambar: str,
     hostname_uca: str,
     include_vlan_623: bool = False,
@@ -3298,6 +3315,14 @@ def export_config_with_templates(
 
     for sw_rows in rows_by_switch.values():
         sw_rows.sort(key=lambda r: _stack_interface_sort_key(r[3]))
+
+    poe_default_gateway = "10.192.131.254" if is_less_than_200 else "10.192.130.254"
+    if which in ("POE", "AMBAR_T"):
+        default_gateway_override: Optional[str] = poe_default_gateway
+    elif which == "UCA":
+        default_gateway_override = "10.192.129.254"
+    else:
+        default_gateway_override = None
 
     used_vlans: Set[str] = set()
     for r in rows_sorted:
@@ -3338,6 +3363,7 @@ def export_config_with_templates(
             forced_hostname=forced_hostname,
             which=which,
             include_vlan_623=include_vlan_623,
+            default_gateway_override=default_gateway_override,
         )
         f.write("! ------------------------------------------------------------\n")
 
@@ -3360,7 +3386,7 @@ def export_config_with_templates(
                 rows_sorted,
                 iface_cfgs,
                 host_metadata,
-                default_gateway="10.192.129.254",
+                default_gateway=default_gateway_override,
             )
             for line in mgmt_lines:
                 f.write(line + "\n")
@@ -3399,7 +3425,7 @@ def export_config_with_templates(
                 rows_sorted,
                 iface_cfgs,
                 host_metadata,
-                default_gateway="10.192.130.254",
+                default_gateway=poe_default_gateway,
             )
             for line in mgmt_lines:
                 f.write(line + "\n")
@@ -3432,7 +3458,7 @@ def export_config_with_templates(
                 rows_sorted,
                 iface_cfgs,
                 host_metadata,
-                default_gateway="10.192.130.254",
+                default_gateway=poe_default_gateway,
             )
             for line in mgmt_lines:
                 f.write(line + "\n")
@@ -3823,6 +3849,7 @@ if __name__ == "__main__":
     cfg_poe   = export_config_with_templates(
         all_rows, out_dir, which="POE", iface_cfgs=all_iface_cfgs,
         switch_number=switch_number,
+        is_less_than_200=is_less_than_200,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
@@ -3830,6 +3857,7 @@ if __name__ == "__main__":
     cfg_amb_t = export_config_with_templates(
         all_rows, out_dir, which="AMBAR_T", iface_cfgs=all_iface_cfgs,
         switch_number=switch_number,
+        is_less_than_200=is_less_than_200,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
@@ -3837,6 +3865,7 @@ if __name__ == "__main__":
     cfg_uca_t = export_config_with_templates(
         all_rows, out_dir, which="UCA", iface_cfgs=all_iface_cfgs,
         switch_number=switch_number,
+        is_less_than_200=is_less_than_200,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
