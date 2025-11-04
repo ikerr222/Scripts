@@ -1463,6 +1463,19 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         POE_MEMBER_METADATA.clear()
         return [], ambar_others
 
+    avoid_requires_poe = False
+    if has_wifi:
+        for collection in (wifi_items, voip_items, ambar_others, trunk_items):
+            if any(item.get("avoid_uxm") for item in collection):
+                avoid_requires_poe = True
+                break
+
+    if avoid_requires_poe and len(capacities) == 1:
+        usable_aux = max(POE_AUX_FINAL_PORTS - 2, 0)
+        avoid_count = sum(1 for coll in (wifi_items, voip_items, ambar_others, trunk_items) for item in coll if item.get("avoid_uxm"))
+        extra_capacity = POE_AUX_FINAL_PORTS if avoid_count <= usable_aux else POE_MAX_PORTS
+        capacities.append(extra_capacity)
+
     def _build_meta(caps: List[int]) -> Tuple[List[Dict[str, Any]], int]:
         meta: List[Dict[str, Any]] = []
         total = 0
