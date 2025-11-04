@@ -1740,35 +1740,43 @@ def make_mapping_uca(uca_items, reserved_tail: int):
     return rows
 
 
-def _apply_uca_management_trunks(uca_rows: List[List[str]], *, include_mgmt_vlan: bool) -> None:
-    if not include_mgmt_vlan:
-        return
-
+def _collect_trunk_allowed_from_rows(rows: List[List[str]], group: str) -> Tuple[List[Tuple[int, List[str]]], List[str]]:
     entries: List[Tuple[int, List[str]]] = []
     allowed: Set[str] = set()
 
-    for idx, row in enumerate(uca_rows):
-        if row[-1] != "UCA":
+    for idx, row in enumerate(rows):
+        if row[-1] != group:
             continue
         entries.append((idx, row))
-        if row[0] == "LIBRE":
+        if str(row[0]).upper() == "LIBRE":
             continue
         vlan = row[6]
-        if vlan and vlan.isdigit():
-            allowed.add(vlan)
+        if vlan and str(vlan).isdigit():
+            allowed.add(str(vlan))
         allowed.update(_vlans_from_tag_string(row[8]))
 
-    if not entries:
-        return
-
-    allowed.add("623")
     try:
-        allowed_list = sorted(allowed, key=int)
+        ordered = sorted(allowed, key=int)
     except ValueError:
-        allowed_list = sorted(allowed)
+        ordered = sorted(allowed)
 
-    if not allowed_list:
-        allowed_list = ["623"]
+    return entries, ordered
+
+
+def _apply_uca_management_trunks(uca_rows: List[List[str]], *, include_mgmt_vlan: bool) -> Optional[List[str]]:
+    if not include_mgmt_vlan:
+        return None
+
+    entries, allowed_list = _collect_trunk_allowed_from_rows(uca_rows, "UCA")
+    if not entries:
+        return None
+
+    if "623" not in allowed_list:
+        allowed_list.append("623")
+    try:
+        allowed_list = sorted(allowed_list, key=int)
+    except ValueError:
+        allowed_list = sorted(allowed_list)
 
     pos, last_row = max(
         entries,
@@ -1791,6 +1799,47 @@ def _apply_uca_management_trunks(uca_rows: List[List[str]], *, include_mgmt_vlan
         "N/A",
         "UCA",
     ]
+
+    return allowed_list
+
+
+def _ensure_poe_downlink_trunk(
+    poe_rows: List[List[str]],
+    allowed_vlans: Optional[List[str]],
+) -> None:
+    if not allowed_vlans:
+        return
+
+    try:
+        ordered = sorted({str(v) for v in allowed_vlans}, key=int)
+    except ValueError:
+        ordered = sorted({str(v) for v in allowed_vlans})
+
+    allowed_str = ",".join(ordered)
+    tag_str = f"VLANS={allowed_str};ORIGIN=TRUNK"
+
+    for idx in range(len(poe_rows) - 1, -1, -1):
+        row = poe_rows[idx]
+        if row[-1] != "POE":
+            continue
+        if str(row[0]).upper() != "LIBRE":
+            continue
+        iface_new = row[3]
+        sw_name = row[5]
+        poe_rows[idx] = [
+            "TRUNK",
+            "TRUNK",
+            "TRUNK UCA",
+            iface_new,
+            "TRUNK UCA",
+            sw_name,
+            "trunk",
+            "trunk",
+            tag_str,
+            "N/A",
+            "POE",
+        ]
+        return
 
 
 def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tuple[str, str], List[str]], Dict[str, Dict[str, Any]]]:
@@ -3063,30 +3112,29 @@ def _collect_group_vlans(rows: List[List[str]], group_tag: str) -> Set[str]:
 
 
 def _poe_uplink_interfaces() -> List[Tuple[str, str]]:
-    """Return the fixed uplink members for the POE stack (CORE_1/CORE_2)."""
-    if not POE_MEMBER_METADATA:
-        return []
-
-    first_member = min(POE_MEMBER_METADATA.keys())
+    """Return the default uplink members for the POE (UXM/AMBAR) stack."""
+    members = sorted(POE_MEMBER_METADATA.keys())
+    first_member = members[0] if members else 1
+    second_member = members[1] if len(members) > 1 else first_member + 1
     return [
         (f"TwentyFiveGigE{first_member}/1/1", "Interfaz Uplink CORE_1"),
-        (f"TwentyFiveGigE{first_member}/1/2", "Interfaz Uplink CORE_2"),
+        (f"TenGigabitEthernet{second_member}/1/1", "Interfaz Uplink CORE_2"),
     ]
 
 
 def _ambar_t_uplink_interfaces() -> List[Tuple[str, str]]:
     """Uplinks for AMBAR-T stacks (fixed numbering)."""
     return [
-        ("TwentyFiveGigE1/1/2", "Interfaz Uplink CORE_1"),
-        ("TwentyFiveGigE2/1/2", "Interfaz Uplink CORE_2"),
+        ("TwentyFiveGigE1/1/1", "Interfaz Uplink CORE_1"),
+        ("TenGigabitEthernet2/1/1", "Interfaz Uplink CORE_2"),
     ]
 
 
 def _uca_uplink_interfaces() -> List[Tuple[str, str]]:
     """Uplinks for UCA stacks (fixed numbering)."""
     return [
-        ("Twe1/1/1", "Interfaz Uplink CORE_1"),
-        ("Twe1/1/2", "Interfaz Uplink CORE_2"),
+        ("TenGigabitEthernet1/1/1", "Interfaz Uplink CORE_1"),
+        ("TenGigabitEthernet1/1/2", "Interfaz Uplink CORE_2"),
     ]
 
 
@@ -3516,7 +3564,8 @@ def export_config_video(
                 block = iface_cfgs.get((sw_act, if_act))
                 f.write(f"interface {if_new}\n")
                 if block:
-                    for ln in block:
+                    filtered = _filter_out_sticky(block)
+                    for ln in filtered:
                         if re.match(r"^\s*interface\b", ln, re.IGNORECASE):
                             continue
                         f.write(ln if ln.endswith("\n") else ln + "\n")
@@ -3680,7 +3729,16 @@ if __name__ == "__main__":
     ambar_t_rows = make_mapping_ambar_t(ambar_overflow) if ambar_overflow else []
     uca_reserved_tail = UCA_RESERVED_TAIL_FREE + (1 if include_vlan_623 else 0)
     uca_rows = make_mapping_uca(uca_items, reserved_tail=uca_reserved_tail)
-    _apply_uca_management_trunks(uca_rows, include_mgmt_vlan=include_vlan_623)
+    _, base_uca_allowed = _collect_trunk_allowed_from_rows(uca_rows, "UCA")
+    uca_trunk_allowed = base_uca_allowed
+    if include_vlan_623:
+        allowed_with_mgmt = _apply_uca_management_trunks(
+            uca_rows,
+            include_mgmt_vlan=include_vlan_623,
+        )
+        if allowed_with_mgmt:
+            uca_trunk_allowed = allowed_with_mgmt
+    _ensure_poe_downlink_trunk(poe_rows, uca_trunk_allowed)
     if video_inputs:
         video_rows, video_iface_cfgs, video_metadata = make_mapping_video(video_inputs)
         host_metadata.update(video_metadata)
