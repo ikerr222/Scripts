@@ -3164,6 +3164,19 @@ def _build_management_vlan_lines(
     return lines
 
 
+def _format_vlan_name(name: str) -> str:
+    """Return a VLAN name safe for configuration usage (no spaces)."""
+
+    if not name:
+        return name
+
+    stripped = name.strip()
+    if not stripped:
+        return stripped
+
+    return re.sub(r"\s+", "_", stripped)
+
+
 def export_config_with_templates(
     rows: List[List[str]],
     out_dir: str,
@@ -3210,9 +3223,10 @@ def export_config_with_templates(
     if which == "AMBAR_T":
         used_vlans.add("623")
 
-    if which == "UCA" and include_vlan_623:
+    if which == "UCA":
         used_vlans.add("2230")
-        used_vlans.add("623")
+        if include_vlan_623:
+            used_vlans.add("623")
 
     forced_hostname = hostname_ambar if which in ("POE", "AMBAR_T") else hostname_uca
     switch_locations: Dict[str, str] = {}
@@ -3240,7 +3254,7 @@ def export_config_with_templates(
                 f.write(f"vlan {vlan}\n")
                 vlan_name = VLAN_NAME_MAP.get(vlan)
                 if vlan_name:
-                    f.write(f" name {vlan_name}\n")
+                    f.write(f" name {_format_vlan_name(vlan_name)}\n")
                 else:
                     f.write(f" name VLAN_{vlan}\n")
                 f.write("!\n")
@@ -3259,6 +3273,8 @@ def export_config_with_templates(
 
         if which == "UCA":
             uca_allowed_set = {v for v in cleaned_vlans if v != "623"}
+            if not include_vlan_623:
+                uca_allowed_set.add("2230")
             try:
                 uca_allowed = sorted(uca_allowed_set, key=int)
             except ValueError:
