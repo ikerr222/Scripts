@@ -1963,9 +1963,11 @@ def _sort_group_rows(rows: List[List[str]]) -> None:
 
 # ---------- Excel ----------
 
-def export_excel(all_rows, out_dir):
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    xlsx = os.path.join(out_dir, f"mapeo_wifi_voip_ambar_uca_{ts}.xlsx")
+def export_excel(all_rows, out_dir, switch_number: Union[str, int]):
+    switch_suffix = str(switch_number).strip()
+    if not switch_suffix:
+        switch_suffix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    xlsx = os.path.join(out_dir, f"{switch_suffix}_Excel.xlsx")
 
     cols = [
         "SW Actual","Interface actual","Description actual","Interface nuevo",
@@ -3272,16 +3274,19 @@ def export_config_with_templates(
     which: str,
     iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
+    switch_number: Union[str, int],
     hostname_ambar: str,
     hostname_uca: str,
     include_vlan_623: bool = False,
     host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    switch_suffix = str(switch_number).strip()
+    if not switch_suffix:
+        switch_suffix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     out_map = {
-        "POE":      f"config_poe_{ts}.txt",
-        "AMBAR_T":  f"config_ambar_t_{ts}.txt",
-        "UCA":      f"config_uca_t_{ts}.txt",
+        "POE":      f"{switch_suffix}_UXM_Config.txt",
+        "AMBAR_T":  f"{switch_suffix}_AMBAR_Config.txt",
+        "UCA":      f"{switch_suffix}_UCA_Config.txt",
     }
     txt = os.path.join(out_dir, out_map[which])
 
@@ -3697,27 +3702,24 @@ def resolve_cli_inputs(args: Iterable[str]) -> List[str]:
         raise SystemExit(1)
     return resolved
 
-def prompt_yes_no(question: str, *, default: bool = False) -> bool:
-    yes_values = {"si", "sí", "s", "y", "yes"}
-    no_values = {"no", "n"}
-
-    suffix = " [S/N]" if default else " [s/n]"
-    prompt = f"{question.strip()}{suffix}: "
-
+def prompt_switch_number() -> int:
     while True:
-        answer = input(prompt).strip().lower()
-        if not answer:
-            return default
-        if answer in yes_values:
-            return True
-        if answer in no_values:
-            return False
-        print("  - Responde 'Si' o 'No' (también se aceptan S/N).")
+        raw = input("Introduce el número del switch: ").strip()
+        if not raw:
+            print("  - Debes introducir un número de switch (por ejemplo 714).")
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            print("  - Introduce un número válido (por ejemplo 714).")
+            continue
+        return value
 
 # ---------- Main ----------
 
 if __name__ == "__main__":
-    is_less_than_200 = prompt_yes_no("¿El switch es menor de 200? Si/No")
+    switch_number = prompt_switch_number()
+    is_less_than_200 = switch_number < 200
     include_vlan_623 = is_less_than_200
 
     cli_args = sys.argv[1:]
@@ -3816,22 +3818,25 @@ if __name__ == "__main__":
     out_dir = r"X:\\AENA\\Postventa\\2024\\OP046517 Renovacion Acceso AO Barcelona\\3 Documentación\\33 TIC\\Migraciones\\SalidaScript"
     os.makedirs(out_dir, exist_ok=True)
 
-    xlsx_path = export_excel(all_rows, out_dir)
+    xlsx_path = export_excel(all_rows, out_dir, switch_number)
 
     cfg_poe   = export_config_with_templates(
         all_rows, out_dir, which="POE", iface_cfgs=all_iface_cfgs,
+        switch_number=switch_number,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
     )
     cfg_amb_t = export_config_with_templates(
         all_rows, out_dir, which="AMBAR_T", iface_cfgs=all_iface_cfgs,
+        switch_number=switch_number,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
     ) if ambar_t_rows else None
     cfg_uca_t = export_config_with_templates(
         all_rows, out_dir, which="UCA", iface_cfgs=all_iface_cfgs,
+        switch_number=switch_number,
         hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
