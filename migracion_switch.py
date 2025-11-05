@@ -3186,6 +3186,8 @@ def _filter_out_sticky(lines: List[str]) -> List[str]:
                 continue
         elif re.search(r"switchport\s+port-security\s+violation", ln, re.IGNORECASE):
             continue
+        elif re.search(r"switchport\s+port-security\s+aging", ln, re.IGNORECASE):
+            continue
         else:
             filtered.append(ln)
     return filtered
