@@ -1219,6 +1219,7 @@ def build_inventory_from_logs(filepaths: List[str]):
     wifi_items, voip_items, uca_items, ambar_other_items, trunk_items = [], [], [], [], []
     all_iface_cfgs: Dict[Tuple[str, str], List[str]] = {}
     host_metadata: Dict[str, Dict[str, Any]] = {}
+    skipped_ports: List[Dict[str, Any]] = []
 
     for fp in filepaths:
         host, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map, metadata = parse_log(fp)
@@ -1235,7 +1236,8 @@ def build_inventory_from_logs(filepaths: List[str]):
         }
 
         for r in int_rows:
-            status = r["status"].lower()
+            status_display = r["status"]
+            status = status_display.lower()
             port_short = r["port"]
             last_info = last_io_map.get(port_short)
             block = iface_cfg_map.get(port_short)
@@ -1248,8 +1250,26 @@ def build_inventory_from_logs(filepaths: List[str]):
                     return False
                 return last_seconds is not None and last_seconds < INACTIVITY_THRESHOLD_SECONDS
 
+            def _register_skip(reason_code: str) -> None:
+                last_raw = last_info[0] if last_info else None
+                output_raw = last_info[1] if last_info else None
+                last_seconds = last_info[2] if last_info else None
+                skipped_ports.append(
+                    {
+                        "host": host,
+                        "port": port_short,
+                        "status": status_display,
+                        "reason": reason_code,
+                        "last_raw": last_raw,
+                        "output_raw": output_raw,
+                        "last_seconds": last_seconds,
+                        "name": r.get("name"),
+                    }
+                )
+
             if status != "connected":
                 if not (status == "notconnect" and _has_recent_activity(last_info)):
+                    _register_skip("status_not_connected")
                     continue
 
             vlan = r["vlan"].strip()
@@ -1267,8 +1287,10 @@ def build_inventory_from_logs(filepaths: List[str]):
                     and last_raw.strip().lower() == "never"
                     and output_raw.strip().lower() == "never"
                 ):
+                    _register_skip("never")
                     continue
                 if last_seconds is not None and last_seconds >= INACTIVITY_THRESHOLD_SECONDS:
+                    _register_skip("inactive_threshold")
                     continue
 
             description = description_map.get(port_short)
@@ -1342,7 +1364,17 @@ def build_inventory_from_logs(filepaths: List[str]):
     uca_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     ambar_other_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     trunk_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
-    return wifi_items, voip_items, uca_items, ambar_other_items, trunk_items, all_iface_cfgs, host_metadata
+    skipped_ports.sort(key=lambda x: (x.get("host") or "", port_key(x.get("port") or "")))
+    return (
+        wifi_items,
+        voip_items,
+        uca_items,
+        ambar_other_items,
+        trunk_items,
+        all_iface_cfgs,
+        host_metadata,
+        skipped_ports,
+    )
 
 
 # ---------- Mapeos ----------
@@ -2121,6 +2153,58 @@ def export_excel(all_rows, out_dir, switch_number: Union[str, int]):
 
 
     return xlsx
+
+
+def export_removed_ports_report(
+    skipped_ports: List[Dict[str, Any]],
+    out_dir: str,
+    switch_number: Union[str, int],
+) -> str:
+    switch_suffix = str(switch_number).strip() or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    txt_path = os.path.join(out_dir, f"{switch_suffix}_Puertos_Eliminados.txt")
+
+    reason_text_map = {
+        "status_not_connected": "Estado distinto de 'connected' sin actividad reciente.",
+        "never": "La interfaz reporta 'Last input/Output never'.",
+        "inactive_threshold": (
+            "Inactividad superior a aproximadamente "
+            f"{INACTIVITY_THRESHOLD_SECONDS // 86400} días."
+        ),
+    }
+
+    with open(txt_path, "w", encoding="utf-8") as f:
+        if not skipped_ports:
+            f.write("No se eliminaron puertos por inactividad o desconexión.\n")
+            return txt_path
+
+        f.write("Puertos descartados por inactividad o estado desconectado:\n\n")
+        for entry in skipped_ports:
+            host = entry.get("host") or "N/A"
+            port = entry.get("port") or "N/A"
+            status = entry.get("status") or "N/A"
+            alias = entry.get("name") or ""
+            last_raw = entry.get("last_raw") or "N/D"
+            output_raw = entry.get("output_raw") or "N/D"
+            last_seconds = entry.get("last_seconds")
+            reason_code = entry.get("reason") or ""
+            reason_text = reason_text_map.get(reason_code, reason_code)
+
+            f.write(f"Host origen: {host}\n")
+            f.write(f"Puerto: {port}\n")
+            if alias:
+                f.write(f"  Alias (show int status): {alias}\n")
+            f.write(f"  Estado: {status}\n")
+            f.write(f"  Last input: {last_raw}\n")
+            f.write(f"  Output: {output_raw}\n")
+            if isinstance(last_seconds, (int, float)) and last_seconds:
+                days = last_seconds / 86400
+                f.write(f"  Inactividad aproximada: {days:.1f} días\n")
+            if reason_text:
+                f.write(f"  Motivo: {reason_text}\n")
+            f.write("\n")
+
+    return txt_path
+
 
 # ---------- Plantillas base + export de configs ----------
 
@@ -3805,6 +3889,7 @@ if __name__ == "__main__":
         trunk_items,
         all_iface_cfgs,
         host_metadata,
+        skipped_ports,
     ) = build_inventory_from_logs(inputs)
 
     poe_rows, ambar_overflow = make_mapping_poe(wifi_items, voip_items, ambar_other_items, trunk_items)
@@ -3858,6 +3943,7 @@ if __name__ == "__main__":
     os.makedirs(out_dir, exist_ok=True)
 
     xlsx_path = export_excel(all_rows, out_dir, switch_number)
+    removed_ports_path = export_removed_ports_report(skipped_ports, out_dir, switch_number)
 
     cfg_poe   = export_config_with_templates(
         all_rows, out_dir, which="POE", iface_cfgs=all_iface_cfgs,
@@ -3893,6 +3979,7 @@ if __name__ == "__main__":
 
     print("\n¡Hecho!")
     print(f"  Excel: {os.path.abspath(xlsx_path)}")
+    print(f"  Puertos eliminados: {os.path.abspath(removed_ports_path)}")
     print(f"  Config POE:     {os.path.abspath(cfg_poe)}")
     if cfg_amb_t:
         print(f"  Config AMBAR-T: {os.path.abspath(cfg_amb_t)}")
