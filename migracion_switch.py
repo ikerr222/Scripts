@@ -3955,29 +3955,35 @@ if __name__ == "__main__":
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
     )
-    cfg_amb_t = export_config_with_templates(
-        all_rows, out_dir, which="AMBAR_T", iface_cfgs=all_iface_cfgs,
-        switch_number=switch_number,
-        is_less_than_200=is_less_than_200,
-        hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
-        include_vlan_623=include_vlan_623,
-        host_metadata=host_metadata,
-    ) if ambar_t_rows else None
-    cfg_uca_t = export_config_with_templates(
-        all_rows, out_dir, which="UCA", iface_cfgs=all_iface_cfgs,
-        switch_number=switch_number,
-        is_less_than_200=is_less_than_200,
-        hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
-        include_vlan_623=include_vlan_623,
-        host_metadata=host_metadata,
-    ) if uca_rows else None
+    cfg_amb_t = None
+    if ambar_t_rows:
+        cfg_amb_t = export_config_with_templates(
+            all_rows, out_dir, which="AMBAR_T", iface_cfgs=all_iface_cfgs,
+            switch_number=switch_number,
+            is_less_than_200=is_less_than_200,
+            hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
+            include_vlan_623=include_vlan_623,
+            host_metadata=host_metadata,
+        )
+    cfg_uca_t = None
+    if uca_rows:
+        cfg_uca_t = export_config_with_templates(
+            all_rows, out_dir, which="UCA", iface_cfgs=all_iface_cfgs,
+            switch_number=switch_number,
+            is_less_than_200=is_less_than_200,
+            hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
+            include_vlan_623=include_vlan_623,
+            host_metadata=host_metadata,
+        )
     combined_cfgs = {**all_iface_cfgs, **video_iface_cfgs}
-    cfg_video = export_config_video(
-        all_rows, out_dir,
-        iface_cfgs=combined_cfgs,
-        hostname_video=hostname_video,
-        host_metadata=host_metadata,
-    ) if video_rows else None
+    cfg_video = None
+    if video_rows:
+        cfg_video = export_config_video(
+            all_rows, out_dir,
+            iface_cfgs=combined_cfgs,
+            hostname_video=hostname_video,
+            host_metadata=host_metadata,
+        )
 
     print("\n¡Hecho!")
     print(f"  Excel: {os.path.abspath(xlsx_path)}")
