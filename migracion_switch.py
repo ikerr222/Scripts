@@ -2247,6 +2247,102 @@ VIDEO_ACL_LINES = [
     "access-list 10 permit 104.192.128.0 0.0.255.255",
 ]
 
+VIDEO_BANNER_LINES = [
+    "banner exec ^C",
+    "Session established to $(hostname) on line $(line)",
+    "^C",
+    "banner incoming ^C",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! PROHIBIDO !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!                                                                            !!",
+    "!!           Queda totalmente prohibido el uso del protocolo TELNET           !!",
+    "!!                   Contacte con el administrador de la red                  !!",
+    "!!                                                                            !!",
+    "!!           The use of the TELNET protocol is completely prohibited          !!",
+    "!!                       Contact the network administrator                    !!",
+    "!!                                                                            !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! FORBIDDEN !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "^C",
+    "banner login ^C",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ATENCION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!                                                                            !!",
+    "!!                          Solo personal autorizado                          !!",
+    "!!                                                                            !!",
+    "!!                          Authorized personal only                          !!",
+    "!!                                                                            !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CAUTION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "^C",
+    "banner motd ^C",
+    "********************************************************************************",
+    "**                                                                            **",
+    "**                       AENA - Aeropuerto Barcelona                          **",
+    "**                                                                            **",
+    "**         Division de Tecnologias de la Informacion y Comunicaciones         **",
+    "**                                                                            **",
+    "**                  Esta accediendo a un sistema protegido                    **",
+    "**          Si no esta autorizado cierre inmediatamente su conexion           **",
+    "**                  La manipulacion no autorizada infringe                    **",
+    "**             la ley 21/2003, de 7 de Julio, de Seguridad Aerea              **",
+    "**                                                                            **",
+    "********************************************************************************",
+    "**                                                                            **",
+    "**                         This is a Private System                           **",
+    "**          If you are not authorized close your connection inmediatly        **",
+    "**                    Unauthorized access is regulated by                     **",
+    "**                   Air Security Law 21/2003, 7th of July                    **",
+    "**                                                                            **",
+    "********************************************************************************",
+    "|                          Informacion de Acceso",
+    "|                          Equipo: $(hostname)",
+    "|",
+    "|                       Autorizacion mediante TACACS+",
+    "|",
+    "^C",
+    "banner prompt-timeout ^C",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ADVERTENCIA !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!                                                                            !!",
+    "!!                      Ha experiado el tiempo de session                     !!",
+    "!!                                                                            !!",
+    "!!                        Has experienced session time                        !!",
+    "!!                                                                            !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "^C",
+    "banner config-save ^C",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMACION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!                                                                            !!",
+    "!!         Desea realizar una copia de la configuracion en ejecucion          !!",
+    "!!                                                                            !!",
+    "!!           You want to make a copy of the running configuration             !!",
+    "!!                                                                            !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMATION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "^C",
+    "!",
+    "line con 0",
+    " session-timeout 15",
+    " exec-timeout 15 0",
+    " authorization exec TAC-AUTO",
+    " accounting exec TAC-ACC",
+    " logging synchronous",
+    " login authentication TAC-AUTH",
+    " stopbits 1",
+    "line vty 0 4",
+    " session-timeout 15",
+    " exec-timeout 15 0",
+    " authorization exec TAC-AUTO",
+    " accounting exec TAC-ACC",
+    " logging synchronous",
+    " login authentication TAC-AUTH",
+    " transport preferred ssh",
+    "line vty 5 15",
+    " session-timeout 15",
+    " exec-timeout 15 0",
+    " authorization exec TAC-AUTO",
+    " accounting exec TAC-ACC",
+    " logging synchronous",
+    " login authentication TAC-AUTH",
+    " transport preferred ssh",
+    "!",
+]
+
 def _read_template_file(path: str) -> List[str]:
     if not os.path.exists(path):
         return []
@@ -2832,22 +2928,52 @@ def _uca_extra_base_lines() -> List[str]:
     return lines
 
 
-def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
+
+def _video_extra_base_lines(metadata: Dict[str, Any], *, level: str) -> List[str]:
     def _short(name: Optional[str]) -> Optional[str]:
         return to_short_ifname(name) if name else None
 
-    mgmt_if = _short(metadata.get("management_interface")) or "Loopback0"
+    def _format_source_interface(name: str) -> str:
+        if not name:
+            return name
+        lowered = name.lower()
+        if lowered.startswith("loopback"):
+            suffix = name[len("Loopback"):]
+            if suffix.isdigit():
+                return f"loopback {suffix}"
+        return name
+
+    level_key = str(level).strip()
+    if level_key not in {"2", "3"}:
+        level_key = "2"
+
+    mgmt_candidate = _short(metadata.get("management_interface"))
+    if level_key == "2":
+        mgmt_if = mgmt_candidate or "Vlan9XX"
+    else:
+        mgmt_if = mgmt_candidate or "Loopback0"
+
     default_gateway = metadata.get("ip_default_gateway")
+    if not default_gateway:
+        default_gateway = "104.129.XX.XX" if level_key == "2" else "10.192.133.254"
+
     register_if = _short(metadata.get("ip_pim_register_source")) or mgmt_if
-    rp_lines = metadata.get("ip_pim_rp_lines", [])
-    name_servers = metadata.get("ip_name_server_lines") or ["ip name-server 104.16.99.100"]
-    snmp_contact = metadata.get("snmp_contact") or DEFAULT_SNMP_CONTACT
+    rp_lines = [ln.strip() for ln in metadata.get("ip_pim_rp_lines", []) if ln.strip()]
+
+    name_servers_raw = metadata.get("ip_name_server_lines") or ["ip name-server 104.16.99.100"]
+    name_servers: List[str] = []
+    for ns in name_servers_raw:
+        ns_line = ns.strip()
+        if ns_line and ns_line not in name_servers:
+            name_servers.append(ns_line)
+
     tftp_if = _short(metadata.get("ip_tftp_source_interface")) or mgmt_if
     http_if = _short(metadata.get("ip_http_client_source_interface")) or mgmt_if
-    snmp_src_if = _short(metadata.get("snmp_source_interface")) or mgmt_if
+    snmp_src_if = _format_source_interface(_short(metadata.get("snmp_source_interface")) or mgmt_if)
     ntp_source_if = _short(metadata.get("ntp_source")) or mgmt_if
 
     lines: List[str] = [
+        "!",
         "service password-encryption",
         "!",
         "aaa new-model",
@@ -2868,17 +2994,19 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "aaa accounting commands 15 default start-stop group tacacs+",
         "aaa session-id common",
         "!",
-        "ip routing",
-        "ip multicast-routing",
-        "ip multicast multipath",
-        "!",
     ]
 
-    for ns in name_servers:
-        ns_line = ns.strip()
-        if ns_line:
-            lines.append(ns_line)
+    if level_key == "3":
+        lines.extend([
+            "ip routing",
+            "ip multicast-routing",
+            "ip multicast multipath",
+            "!",
+        ])
+    else:
+        lines.append("!")
 
+    lines.extend(name_servers)
     lines.extend([
         "no ip domain lookup",
         "ip domain name aena.es",
@@ -2888,12 +3016,10 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "lldp run",
         "!",
         f"ip tftp source-interface {tftp_if}",
-        f"ip http client source-interface {http_if}",
         "ip ssh time-out 60",
         "ip ssh authentication-retries 2",
         "ip ssh version 2",
         "ip scp server enable",
-        "ip tftp blocksize 512",
         "!",
         "archive",
         " log config",
@@ -2906,10 +3032,43 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "!",
         "username admin privilege 15 secret 0 7BCN@ena.2024,",
         "!",
+        "interface GigabitEthernet0/0",
+        " vrf forwarding Mgmt-vrf",
+        " ip address 6.6.6.6 255.255.255.252",
+        " negotiation auto",
+        "no shutdown",
+        "!",
+        "interface Loopback0",
     ])
 
-    if default_gateway:
-        lines.append(f"ip default-gateway {default_gateway}")
+    if level_key == "2":
+        lines.extend([
+            " ip address 10.192.132.x 255.255.255.255",
+            "shutdown",
+            "!",
+            f"interface {mgmt_if}",
+            " ip address 104.129.XX.YY 255.255.255.252",
+            " no ip route-cache",
+            "!",
+        ])
+    else:
+        lines.extend([
+            " ip address 10.192.132.11 255.255.255.255",
+            "!",
+        ])
+
+    lines.append(f"ip default-gateway {default_gateway}")
+
+    if level_key == "3":
+        if rp_lines:
+            lines.extend(rp_lines)
+        else:
+            lines.append("ip pim rp-address 104.241.254.254")
+
+    lines.append(f"ip pim register-source {register_if}")
+
+    if level_key == "2" and rp_lines:
+        lines.extend(rp_lines)
 
     lines.extend([
         "ip forward-protocol nd",
@@ -2917,16 +3076,14 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "ip http authentication aaa login-authentication TAC-AUTH",
         "ip http authentication aaa exec-authorization TAC-AUTO",
         "ip http secure-server",
-    ])
-
-    if register_if:
-        lines.append(f"ip pim register-source {register_if}")
-    for rp in rp_lines:
-        rp_line = rp.strip()
-        if rp_line:
-            lines.append(rp_line)
-
-    lines.extend([
+        f"ip http client source-interface {http_if}",
+        f"ip tftp source-interface {tftp_if}",
+        "ip tftp blocksize 512",
+        "ip ssh time-out 60",
+        "ip ssh authentication-retries 2",
+        "ip ssh version 2",
+        "ip scp server enable",
+        "!",
         "logging trap debugging",
         "logging host 4.9.0.135",
         "logging host 104.16.0.225",
@@ -2951,114 +3108,22 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "snmp-server community BCN2010rw RW",
         "snmp-server user V3Dcom V3groupDCOM v3 auth sha #2024@En@! priv des @En@,.2025!",
         "snmp-server enable traps",
-        "snmp-server host 104.16.0.225 version 2c GreBCNro",
-        "snmp-server host 104.16.0.225 version 3 priv V3gesred",
-        "snmp-server host 4.9.0.135 version 2c GreBCNro",
-        "snmp-server host 4.9.0.135 version 3 priv V3gesred",
-        "snmp-server host 104.18.220.10 version 2c GreBCNro",
-        "snmp-server host 104.18.220.10 version 3 priv V3gesred",
     ])
 
     if snmp_src_if:
         lines.append(f"snmp-server source-interface traps {snmp_src_if}")
 
     lines.extend([
-        f"snmp-server contact {snmp_contact}",
-        "!",
-        "banner exec ^C",
-        "Session established to $(hostname) on line $(line)",
-        "^C",
-        "banner incoming ^C",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! PROHIBIDO !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "!!                                                                            !!",
-        "!!           Queda totalmente prohibido el uso del protocolo TELNET           !!",
-        "!!                   Contacte con el administrador de la red                  !!",
-        "!!                                                                            !!",
-        "!!           The use of the TELNET protocol is completely prohibited          !!",
-        "!!                       Contact the network administrator                    !!",
-        "!!                                                                            !!",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! FORBIDDEN !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "^C",
-        "banner login ^C",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ATENCION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "!!                                                                            !!",
-        "!!                          Solo personal autorizado                          !!",
-        "!!                                                                            !!",
-        "!!                          Authorized personal only                          !!",
-        "!!                                                                            !!",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CAUTION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "^C",
-        "banner motd ^C",
-        "********************************************************************************",
-        "**                                                                            **",
-        "**                       AENA - Aeropuerto Barcelona                          **",
-        "**                                                                            **",
-        "**         Division de Tecnologias de la Informacion y Comunicaciones         **",
-        "**                                                                            **",
-        "**                  Esta accediendo a un sistema protegido                    **",
-        "**          Si no esta autorizado cierre inmediatamente su conexion           **",
-        "**                  La manipulacion no autorizada infringe                    **",
-        "**             la ley 21/2003, de 7 de Julio, de Seguridad Aerea              **",
-        "**                                                                            **",
-        "********************************************************************************",
-        "**                                                                            **",
-        "**                         This is a Private System                           **",
-        "**          If you are not authorized close your connection inmediatly        **",
-        "**                    Unauthorized access is regulated by                     **",
-        "**                   Air Security Law 21/2003, 7th of July                    **",
-        "**                                                                            **",
-        "********************************************************************************",
-        "|                          Informacion de Acceso",
-        "|                          Equipo: $(hostname)",
-        "|",
-        "|                       Autorizacion mediante TACACS+",
-        "|",
-        "^C",
-        "banner prompt-timeout ^C",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ADVERTENCIA !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "!!                                                                            !!",
-        "!!                      Ha experiado el tiempo de session                     !!",
-        "!!                                                                            !!",
-        "!!                        Has experienced session time                        !!",
-        "!!                                                                            !!",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "^C",
-        "banner config-save ^C",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMACION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "!!                                                                            !!",
-        "!!         Desea realizar una copia de la configuracion en ejecucion          !!",
-        "!!                                                                            !!",
-        "!!           You want to make a copy of the running configuration             !!",
-        "!!                                                                            !!",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMATION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "^C",
-        "!",
-        "line con 0",
-        " session-timeout 15",
-        " exec-timeout 15 0",
-        " authorization exec TAC-AUTO",
-        " accounting exec TAC-ACC",
-        " logging synchronous",
-        " login authentication TAC-AUTH",
-        " stopbits 1",
-        "line vty 0 4",
-        " session-timeout 15",
-        " exec-timeout 15 0",
-        " authorization exec TAC-AUTO",
-        " accounting exec TAC-ACC",
-        " logging synchronous",
-        " login authentication TAC-AUTH",
-        " transport preferred ssh",
-        "line vty 5 15",
-        " session-timeout 15",
-        " exec-timeout 15 0",
-        " authorization exec TAC-AUTO",
-        " accounting exec TAC-ACC",
-        " logging synchronous",
-        " login authentication TAC-AUTH",
-        " transport preferred ssh",
+        "snmp-server host 104.16.0.225 version 2c GreBCNro",
+        "snmp-server host 104.16.0.225 version 3 priv V3gesred",
+        "snmp-server host 4.9.0.135 version 2c GreBCNro",
+        "snmp-server host 4.9.0.135 version 3 priv V3gesred",
+        "snmp-server host 104.18.220.10 version 2c GreBCNro",
+        "snmp-server host 104.18.220.10 version 3 priv V3gesred",
         "!",
     ])
+
+    lines.extend(VIDEO_BANNER_LINES)
 
     if ntp_source_if:
         lines.append(f"ntp source {ntp_source_if}")
@@ -3687,6 +3752,7 @@ def export_config_video(
     iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
     hostname_video: str,
+    video_level: str,
     host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -3704,7 +3770,7 @@ def export_config_video(
         first_host = rows_sorted[0][0]
         base_metadata = metadata_map.get(first_host, {})
 
-    base_lines = _video_extra_base_lines(base_metadata)
+    base_lines = _video_extra_base_lines(base_metadata, level=video_level)
 
     switch_locations = _collect_switch_locations(rows, "VIDEO", metadata_map)
     switch_contacts = _collect_switch_contacts(rows, "VIDEO", metadata_map)
@@ -3914,6 +3980,15 @@ if __name__ == "__main__":
     else:
         video_rows, video_iface_cfgs = [], {}
 
+    video_level = "2"
+    if video_rows:
+        while True:
+            raw_level = input("Nivel del switch de VIDEO (2/3): ").strip()
+            if raw_level in {"2", "3"}:
+                video_level = raw_level
+                break
+            print("  - Introduce '2' o '3' para indicar el nivel del switch de VIDEO.")
+
     print("\nIntroduce los hostnames base para las plantillas:")
     hostname_ambar = input("Hostname para switches AMBAR (POE y AMBAR_T): ").strip() or "AMBAR-SW"
     hostname_uca   = input("Hostname para switches UCA: ").strip() or "UCA-SW"
@@ -3982,6 +4057,7 @@ if __name__ == "__main__":
             all_rows, out_dir,
             iface_cfgs=combined_cfgs,
             hostname_video=hostname_video,
+            video_level=video_level,
             host_metadata=host_metadata,
         )
 
