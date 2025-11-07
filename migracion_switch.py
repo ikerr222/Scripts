@@ -3827,12 +3827,16 @@ def export_config_video(
     out_dir: str,
     iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
+    switch_number: Union[str, int],
     hostname_video: str,
     video_level: str,
     host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    txt = os.path.join(out_dir, f"config_video_{ts}.txt")
+    switch_suffix = str(switch_number).strip()
+    if not switch_suffix:
+        switch_suffix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    txt = os.path.join(out_dir, f"{switch_suffix}_VIDEO_Config.txt")
 
     rows_sorted = [r for r in rows if r[-1] == "VIDEO" and r[0] != "LIBRE"]
 
@@ -4132,6 +4136,7 @@ if __name__ == "__main__":
         cfg_video = export_config_video(
             all_rows, out_dir,
             iface_cfgs=combined_cfgs,
+            switch_number=switch_number,
             hostname_video=hostname_video,
             video_level=video_level,
             host_metadata=host_metadata,
