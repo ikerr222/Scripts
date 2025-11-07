@@ -723,8 +723,9 @@ IP_INT_BRIEF_ROW_RE = re.compile(
 )
 
 # --- Filtros de seguridad / parsing ---
-STICKY_LINE_RE   = re.compile(r"^\s*switchport\s+port-?security.*sticky\b", re.IGNORECASE)
-BASE_HOSTNAME_RE = re.compile(r"^\s*hostname\s+\S+", re.IGNORECASE)
+STICKY_LINE_RE        = re.compile(r"^\s*switchport\s+port-?security.*sticky\b", re.IGNORECASE)
+BASE_HOSTNAME_RE      = re.compile(r"^\s*hostname\s+\S+", re.IGNORECASE)
+HOSTNAME_CAPTURE_RE   = re.compile(r"^\s*hostname\s+(\S+)", re.IGNORECASE)
 
 # ---------- Utilidades ----------
 
@@ -1160,6 +1161,12 @@ def parse_log(filepath: str):
             hostname = m.group(1).strip()
             break
     if not hostname:
+        for line in lines:
+            m = HOSTNAME_CAPTURE_RE.search(line)
+            if m:
+                hostname = m.group(1).strip()
+                break
+    if not hostname:
         hostname = os.path.basename(filepath)
 
     # show int status
@@ -1205,6 +1212,8 @@ def parse_log(filepath: str):
     iface_cfg_map = parse_interface_configs_from_running_config(lines)
     last_io_map   = parse_last_io_information(lines)
     metadata      = parse_global_metadata(lines, iface_cfg_map)
+
+    metadata["hostname"] = metadata.get("hostname") or hostname
 
     return hostname, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map, metadata
 
@@ -1257,6 +1266,7 @@ def build_inventory_from_logs(filepaths: List[str]):
                 skipped_ports.append(
                     {
                         "host": host,
+                        "hostname": metadata.get("hostname") or host,
                         "port": port_short,
                         "status": status_display,
                         "reason": reason_code,
@@ -1364,7 +1374,12 @@ def build_inventory_from_logs(filepaths: List[str]):
     uca_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     ambar_other_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     trunk_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
-    skipped_ports.sort(key=lambda x: (x.get("host") or "", port_key(x.get("port") or "")))
+    skipped_ports.sort(
+        key=lambda x: (
+            (x.get("hostname") or x.get("host") or ""),
+            port_key(x.get("port") or ""),
+        )
+    )
     return (
         wifi_items,
         voip_items,
@@ -2179,7 +2194,7 @@ def export_removed_ports_report(
 
         f.write("Puertos descartados por inactividad o estado desconectado:\n\n")
         for entry in skipped_ports:
-            host = entry.get("host") or "N/A"
+            hostname = entry.get("hostname") or entry.get("host") or "N/A"
             port = entry.get("port") or "N/A"
             status = entry.get("status") or "N/A"
             alias = entry.get("name") or ""
@@ -2189,7 +2204,7 @@ def export_removed_ports_report(
             reason_code = entry.get("reason") or ""
             reason_text = reason_text_map.get(reason_code, reason_code)
 
-            f.write(f"Host origen: {host}\n")
+            f.write(f"Hostname origen: {hostname}\n")
             f.write(f"Puerto: {port}\n")
             if alias:
                 f.write(f"  Alias (show int status): {alias}\n")
