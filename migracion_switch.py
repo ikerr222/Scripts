@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import unicodedata
+from collections import Counter
 from datetime import datetime
 from typing import Iterable, List, Dict, Tuple, Optional, Callable, Union, Set, Any
 
@@ -785,6 +786,12 @@ IP_INT_BRIEF_ROW_RE = re.compile(
 STICKY_LINE_RE        = re.compile(r"^\s*switchport\s+port-?security.*sticky\b", re.IGNORECASE)
 BASE_HOSTNAME_RE      = re.compile(r"^\s*hostname\s+\S+", re.IGNORECASE)
 HOSTNAME_CAPTURE_RE   = re.compile(r"^\s*hostname\s+(\S+)", re.IGNORECASE)
+HOSTNAME_TOKEN_RE     = re.compile(
+    r"(?P<center>\d{3})C\d{3,4}G-(?P<rack>\d{4})(?P<u>\d{2})?(?P<suffix>[A-Za-z0-9]{0,2})",
+    re.IGNORECASE,
+)
+LOCATION_RACK_RE      = re.compile(r"R\s*(\d{2})(\d{2})", re.IGNORECASE)
+LOCATION_U_RE         = re.compile(r"U\s*(\d{2})", re.IGNORECASE)
 
 # ---------- Utilidades ----------
 
@@ -828,6 +835,131 @@ def _format_numbered_name(base_name: str, ordinal: int) -> str:
         return f"{m.group(1)}{ordinal:0{width}d}"
     base = base_name.rstrip("-")
     return f"{base}-{ordinal:02d}" if base else f"{ordinal:02d}"
+
+
+def _extract_hostname_tokens(value: str) -> Optional[Dict[str, Optional[str]]]:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.strip("[]")
+    match = HOSTNAME_TOKEN_RE.search(cleaned)
+    if not match:
+        return None
+    rack = match.group("rack") or ""
+    if len(rack) > 4:
+        rack = rack[:4]
+    tokens: Dict[str, Optional[str]] = {
+        "center": match.group("center"),
+        "rack": rack,
+        "u": match.group("u"),
+        "suffix": match.group("suffix"),
+    }
+    return tokens
+
+
+def _extract_location_tokens(value: Optional[str]) -> Dict[str, Optional[str]]:
+    if not value:
+        return {}
+    rack_match = LOCATION_RACK_RE.search(value)
+    u_match = LOCATION_U_RE.search(value)
+    tokens: Dict[str, Optional[str]] = {}
+    if rack_match:
+        tokens["rack"] = f"{rack_match.group(1)}{rack_match.group(2)}"
+    if u_match:
+        tokens["u"] = u_match.group(1)
+    return tokens
+
+
+def _choose_hostname_prefix(
+    metadata: Dict[str, Dict[str, Any]],
+    switch_number: Union[int, str],
+) -> Tuple[str, str]:
+    center_candidates: Counter = Counter()
+    rack_candidates: Counter = Counter()
+
+    for meta in metadata.values():
+        host_value = meta.get("hostname") or meta.get("host")
+        tokens = _extract_hostname_tokens(host_value) if host_value else None
+        if tokens:
+            if tokens.get("center"):
+                center_candidates[tokens["center"]] += 1
+            if tokens.get("rack"):
+                rack_candidates[tokens["rack"]] += 1
+        loc_tokens = _extract_location_tokens(meta.get("snmp_location"))
+        if loc_tokens.get("rack"):
+            rack_candidates[loc_tokens["rack"]] += 1
+
+    def _resolve(counter: Counter, default: str) -> str:
+        if not counter:
+            return default
+        most_common = counter.most_common(1)[0][0]
+        return most_common
+
+    switch_str = str(switch_number).strip()
+    try:
+        switch_int = int(switch_str)
+    except ValueError:
+        switch_int = None
+
+    if switch_int is not None and switch_int < 1000:
+        default_center = f"{switch_int:03d}"
+    else:
+        default_center = switch_str or "000"
+
+    center = _resolve(center_candidates, default_center)
+
+    if not rack_candidates:
+        # Fallback: derive rack from the first hostname tokens if possible
+        for meta in metadata.values():
+            host_value = meta.get("hostname") or meta.get("host")
+            tokens = _extract_hostname_tokens(host_value) if host_value else None
+            if tokens and tokens.get("rack"):
+                rack_candidates[tokens["rack"]] += 1
+                break
+
+    rack = _resolve(rack_candidates, "0000")
+
+    center = re.sub(r"[^A-Za-z0-9]", "", center or "000")
+    rack = re.sub(r"[^A-Za-z0-9]", "", rack or "0000")
+
+    if center.isdigit() and len(center) < 3:
+        center = center.zfill(3)
+    if rack.isdigit() and len(rack) < 4:
+        rack = rack.zfill(4)
+
+    return center, rack
+
+
+def build_hostname_plan(
+    metadata: Dict[str, Dict[str, Any]],
+    switch_number: Union[int, str],
+    *,
+    include_poe: bool,
+    include_ambar_t: bool,
+    include_uca: bool,
+    include_video: bool,
+) -> Dict[str, str]:
+    center, rack = _choose_hostname_prefix(metadata, switch_number)
+    base_prefix = f"{center}C9300G-{rack}"
+
+    plan: Dict[str, str] = {}
+    ambar_counter = 1
+
+    if include_poe:
+        plan["POE"] = f"{base_prefix}{ambar_counter:02d}A"
+        ambar_counter += 1
+
+    if include_ambar_t:
+        plan["AMBAR_T"] = f"{base_prefix}{ambar_counter:02d}A"
+        ambar_counter += 1
+
+    if include_uca:
+        plan["UCA"] = f"{base_prefix}02U"
+
+    if include_video:
+        plan["VIDEO"] = f"{base_prefix}03V"
+
+    return plan
 
 def _resolve_new_interface(builder: Union[Callable[[int], str], str], idx: int) -> str:
     if callable(builder):
@@ -3516,8 +3648,7 @@ def export_config_with_templates(
     *,
     switch_number: Union[str, int],
     is_less_than_200: bool,
-    hostname_ambar: str,
-    hostname_uca: str,
+    hostname_map: Optional[Dict[str, str]] = None,
     include_vlan_623: bool = False,
     host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
@@ -3586,7 +3717,17 @@ def export_config_with_templates(
         if include_vlan_623:
             used_vlans.add("623")
 
-    forced_hostname = hostname_ambar if which in ("POE", "AMBAR_T") else hostname_uca
+    forced_hostname = None
+    if hostname_map:
+        forced_hostname = hostname_map.get(which)
+
+    if not forced_hostname:
+        if which in ("POE", "AMBAR_T"):
+            forced_hostname = "AMBAR-SW"
+        elif which == "UCA":
+            forced_hostname = "UCA-SW"
+        else:
+            forced_hostname = "VIDEO-SW"
     switch_locations: Dict[str, str] = {}
     switch_contacts: Dict[str, str] = {}
     if host_metadata:
@@ -3828,7 +3969,7 @@ def export_config_video(
     iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
     switch_number: Union[str, int],
-    hostname_video: str,
+    hostname: Optional[str] = None,
     video_level: str,
     host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
@@ -3855,9 +3996,11 @@ def export_config_video(
     switch_locations = _collect_switch_locations(rows, "VIDEO", metadata_map)
     switch_contacts = _collect_switch_contacts(rows, "VIDEO", metadata_map)
 
+    forced_hostname = hostname or "VIDEO-SW"
+
     with open(txt, "w", encoding="utf-8") as f:
         f.write("!\n! Configuración generada (VIDEO)\n!\n")
-        f.write(f"hostname {hostname_video}\n")
+        f.write(f"hostname {forced_hostname}\n")
         for ln in base_lines:
             if ln.endswith("\n"):
                 f.write(ln)
@@ -4069,11 +4212,6 @@ if __name__ == "__main__":
                 break
             print("  - Introduce '2' o '3' para indicar el nivel del switch de VIDEO.")
 
-    print("\nIntroduce los hostnames base para las plantillas:")
-    hostname_ambar = input("Hostname para switches AMBAR (POE y AMBAR_T): ").strip() or "AMBAR-SW"
-    hostname_uca   = input("Hostname para switches UCA: ").strip() or "UCA-SW"
-    hostname_video = input("Hostname para switches VIDEO: ").strip() or "VIDEO-SW"
-
     _sort_group_rows(poe_rows)
     if ambar_t_rows:
         _sort_group_rows(ambar_t_rows)
@@ -4102,11 +4240,20 @@ if __name__ == "__main__":
     xlsx_path = export_excel(all_rows, out_dir, switch_number)
     removed_ports_path = export_removed_ports_report(skipped_ports, out_dir, switch_number)
 
+    hostname_plan = build_hostname_plan(
+        host_metadata,
+        switch_number,
+        include_poe=bool(poe_rows),
+        include_ambar_t=bool(ambar_t_rows),
+        include_uca=bool(uca_rows),
+        include_video=bool(video_rows),
+    )
+
     cfg_poe   = export_config_with_templates(
         all_rows, out_dir, which="POE", iface_cfgs=all_iface_cfgs,
         switch_number=switch_number,
         is_less_than_200=is_less_than_200,
-        hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
+        hostname_map=hostname_plan,
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
     )
@@ -4116,7 +4263,7 @@ if __name__ == "__main__":
             all_rows, out_dir, which="AMBAR_T", iface_cfgs=all_iface_cfgs,
             switch_number=switch_number,
             is_less_than_200=is_less_than_200,
-            hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
+            hostname_map=hostname_plan,
             include_vlan_623=include_vlan_623,
             host_metadata=host_metadata,
         )
@@ -4126,7 +4273,7 @@ if __name__ == "__main__":
             all_rows, out_dir, which="UCA", iface_cfgs=all_iface_cfgs,
             switch_number=switch_number,
             is_less_than_200=is_less_than_200,
-            hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
+            hostname_map=hostname_plan,
             include_vlan_623=include_vlan_623,
             host_metadata=host_metadata,
         )
@@ -4137,12 +4284,24 @@ if __name__ == "__main__":
             all_rows, out_dir,
             iface_cfgs=combined_cfgs,
             switch_number=switch_number,
-            hostname_video=hostname_video,
+            hostname=hostname_plan.get("VIDEO"),
             video_level=video_level,
             host_metadata=host_metadata,
         )
 
     print("\n¡Hecho!")
+    if hostname_plan:
+        print("  Hostnames generados:")
+        name_labels = {
+            "POE": "POE/UXM",
+            "AMBAR_T": "AMBAR-T",
+            "UCA": "UCA",
+            "VIDEO": "VIDEO",
+        }
+        for key in ("POE", "AMBAR_T", "UCA", "VIDEO"):
+            if key in hostname_plan:
+                label = name_labels.get(key, key)
+                print(f"    {label}: {hostname_plan[key]}")
     print(f"  Excel: {os.path.abspath(xlsx_path)}")
     print(f"  Puertos eliminados: {os.path.abspath(removed_ports_path)}")
     print(f"  Config POE:     {os.path.abspath(cfg_poe)}")
