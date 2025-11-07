@@ -665,6 +665,65 @@ UCA_EXTRA_TEMPLATE_DEFAULT   = "uca_config_base_extra.txt"
 # --- Estado dinámico del mapeo POE ---
 POE_MEMBER_METADATA: Dict[int, Dict[str, object]] = {}
 
+
+def _poe_member_meta_by_name(sw_name: str) -> Optional[Dict[str, object]]:
+    """Return the POE member metadata associated to ``sw_name`` if available."""
+
+    for info in POE_MEMBER_METADATA.values():
+        if str(info.get("sw_name")) == sw_name:
+            return info
+    return None
+
+
+def _poe_display_label(
+    sw_name: str,
+    *,
+    interfaces: Optional[Iterable[str]] = None,
+    tags: Optional[Iterable[str]] = None,
+    meta_by_name: Optional[Dict[str, Dict[str, object]]] = None,
+) -> str:
+    """Return the human friendly label for a POE stack member."""
+
+    meta: Optional[Dict[str, object]] = None
+    if meta_by_name is not None:
+        meta = meta_by_name.get(sw_name)
+    if meta is None:
+        meta = _poe_member_meta_by_name(sw_name)
+
+    capacity: Optional[int] = None
+    is_wifi = False
+
+    if meta:
+        raw_capacity = meta.get("capacity")
+        try:
+            capacity = int(raw_capacity) if raw_capacity is not None else None
+        except (TypeError, ValueError):
+            capacity = None
+        is_wifi = str(meta.get("type")) == "wifi"
+
+    if capacity is None and interfaces:
+        max_port = 0
+        for ifname in interfaces:
+            if isinstance(ifname, str):
+                idx = _extract_if_index(ifname)
+                if idx and idx > max_port:
+                    max_port = idx
+        if max_port:
+            capacity = 24 if max_port <= 24 else 48
+
+    if capacity is None:
+        capacity = 48
+
+    if not is_wifi and tags:
+        for tag in tags:
+            if isinstance(tag, str) and "ORIGIN=WIFI" in tag.upper():
+                is_wifi = True
+                break
+
+    label_size = 24 if capacity <= 24 else 48
+    suffix = "P-UXM" if is_wifi else "P"
+    return f"C9300-{label_size}{suffix}"
+
 # ---------- Parsers de los logs ----------
 
 EQUIPO_RE = re.compile(r"^\s*Equipo:\s*([A-Za-z0-9\-\._/]+)", re.IGNORECASE)
@@ -2065,34 +2124,20 @@ def export_excel(all_rows, out_dir, switch_number: Union[str, int]):
 
             display_map: Dict[str, str] = {}
             if group_tag == "POE":
+                meta_by_name = {
+                    str(info.get("sw_name")): info for info in POE_MEMBER_METADATA.values()
+                }
                 for sw_name, grp in subset.groupby("SW Nuevo"):
                     if grp.empty:
                         continue
-                    first_if = grp["Interface nuevo"].iloc[0]
-                    member_idx = _extract_member_index(first_if) if isinstance(first_if, str) else None
-                    meta = POE_MEMBER_METADATA.get(member_idx, {}) if member_idx else {}
-                    capacity = meta.get("capacity") if meta else None
-                    if not capacity:
-                        try:
-                            max_port = grp["Interface nuevo"].map(_extract_if_index).max()
-                        except Exception:
-                            max_port = None
-                        capacity = 24 if max_port and max_port <= 24 else 48
-                    label_size = 24 if capacity and capacity <= 24 else 48
-                    origins = {
-                        origin
-                        for origin in (
-                            _origin_from_tag_string(value)
-                            for value in grp["Tags"].tolist()
-                        )
-                        if origin
-                    }
-                    if meta.get("type") == "wifi":
-                        display_map[sw_name] = f"C9300-{label_size}P-UXM"
-                    elif ("AMBAR" in origins) and not (origins & {"WIFI", "VOIP"}):
-                        display_map[sw_name] = f"C9300-{label_size}T"
-                    else:
-                        display_map[sw_name] = f"C9300-{label_size}P"
+                    interfaces = grp["Interface nuevo"].tolist()
+                    tags = grp["Tags"].tolist()
+                    display_map[sw_name] = _poe_display_label(
+                        sw_name,
+                        interfaces=interfaces,
+                        tags=tags,
+                        meta_by_name=meta_by_name,
+                    )
             elif group_tag == "AMBAR_T":
                 for sw_name, grp in subset.groupby("SW Nuevo"):
                     if grp.empty:
@@ -3495,6 +3540,21 @@ def export_config_with_templates(
     for sw_rows in rows_by_switch.values():
         sw_rows.sort(key=lambda r: _stack_interface_sort_key(r[3]))
 
+    poe_display_map: Dict[str, str] = {}
+    if which == "POE":
+        meta_by_name = {
+            str(info.get("sw_name")): info for info in POE_MEMBER_METADATA.values()
+        }
+        for sw_name, sw_rows in rows_by_switch.items():
+            interfaces = [row[3] for row in sw_rows]
+            tags = [row[8] for row in sw_rows]
+            poe_display_map[sw_name] = _poe_display_label(
+                sw_name,
+                interfaces=interfaces,
+                tags=tags,
+                meta_by_name=meta_by_name,
+            )
+
     poe_default_gateway = "10.192.131.254" if is_less_than_200 else "10.192.130.254"
     if which in ("POE", "AMBAR_T"):
         default_gateway_override: Optional[str] = poe_default_gateway
@@ -3680,7 +3740,8 @@ def export_config_with_templates(
             if location:
                 f.write(f"snmp-server location {location}\n")
             f.write("!\n")
-            f.write(f"! Interfaces para {sw_new}\n")
+            display_name = poe_display_map.get(sw_new, sw_new) if which == "POE" else sw_new
+            f.write(f"! Interfaces para {display_name}\n")
             for sw_act, if_act, desc_act, if_new, desc_new, _, vlan, mode, tags, mac, _ in rows_by_switch[sw_new]:
                 block = iface_cfgs.get((sw_act, if_act))
                 f.write(f"interface {if_new}\n")
