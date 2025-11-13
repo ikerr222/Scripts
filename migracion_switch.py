@@ -692,7 +692,7 @@ def _poe_display_label(
         meta = _poe_member_meta_by_name(sw_name)
 
     capacity: Optional[int] = None
-    is_wifi = False
+    member_type = ""
 
     if meta:
         raw_capacity = meta.get("capacity")
@@ -700,7 +700,12 @@ def _poe_display_label(
             capacity = int(raw_capacity) if raw_capacity is not None else None
         except (TypeError, ValueError):
             capacity = None
-        is_wifi = str(meta.get("type")) == "wifi"
+        raw_type = meta.get("type")
+        if isinstance(raw_type, str):
+            member_type = raw_type.lower()
+
+    is_wifi = member_type == "wifi"
+    is_data_only = member_type == "data"
 
     if capacity is None and interfaces:
         max_port = 0
@@ -715,14 +720,20 @@ def _poe_display_label(
     if capacity is None:
         capacity = 48
 
-    if not is_wifi and tags:
+    if not is_wifi and member_type != "data" and tags:
         for tag in tags:
             if isinstance(tag, str) and "ORIGIN=WIFI" in tag.upper():
                 is_wifi = True
                 break
 
+    if is_wifi:
+        suffix = "P-UXM"
+    elif is_data_only:
+        suffix = "T"
+    else:
+        suffix = "P"
+
     label_size = 24 if capacity <= 24 else 48
-    suffix = "P-UXM" if is_wifi else "P"
     return f"C9300-{label_size}{suffix}"
 
 
@@ -1902,6 +1913,47 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     while member_index < len(capacities):
         goto_next_member()
         flush_current(1)
+
+    # Actualiza el tipo de cada miembro en base a los orígenes asignados.
+    member_roles: Dict[int, str] = {}
+    for idx_meta, meta in POE_MEMBER_METADATA.items():
+        if idx_meta <= 1:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        member_roles[idx_meta] = "data"
+
+    for row in rows:
+        if not row or row[-1] != "POE":
+            continue
+        if str(row[0]).upper() == "LIBRE":
+            continue
+        member_idx = _extract_member_index(row[3])
+        if member_idx is None or member_idx <= 1:
+            continue
+        if member_idx not in member_roles:
+            continue
+        tags_field = row[8]
+        origin = None
+        if isinstance(tags_field, str) and tags_field and tags_field.upper() != "N/A":
+            for part in tags_field.split(";"):
+                if not part:
+                    continue
+                key_val = part.split("=", 1)
+                if len(key_val) != 2:
+                    continue
+                key = key_val[0].strip().upper()
+                if key == "ORIGIN":
+                    origin = key_val[1].strip().upper()
+                    break
+        if origin in {"WIFI", "VOIP"}:
+            member_roles[member_idx] = "poe"
+
+    for idx_meta, role in member_roles.items():
+        meta = POE_MEMBER_METADATA.get(idx_meta)
+        if not isinstance(meta, dict):
+            continue
+        meta["type"] = role
 
     return rows, ambar_overflow
 
