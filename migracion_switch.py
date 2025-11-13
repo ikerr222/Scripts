@@ -1858,10 +1858,10 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
                 break
 
     if avoid_requires_poe and len(capacities) == 1:
-        usable_aux = max(POE_AUX_FINAL_PORTS - 2, 0)
-        avoid_count = sum(1 for coll in (wifi_items, voip_items, ambar_others, trunk_items) for item in coll if item.get("avoid_uxm"))
-        extra_capacity = POE_AUX_FINAL_PORTS if avoid_count <= usable_aux else POE_MAX_PORTS
-        capacities.append(extra_capacity)
+        # Fuerza que el primer miembro "no wifi" sea de 48 puertos para que los
+        # elementos marcados con avoid_uxm compartan chasis con el resto de AMBAR
+        # y no disparen la creación de un segundo chasis adicional de 24T.
+        capacities.append(POE_MAX_PORTS)
 
     def _build_meta(caps: List[int]) -> Tuple[List[Dict[str, Any]], int]:
         meta: List[Dict[str, Any]] = []
