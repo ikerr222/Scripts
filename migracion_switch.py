@@ -2160,6 +2160,7 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
             order = sorted(iface_cfg_map.keys(), key=_stack_interface_sort_key)
 
         sw_name = NEW_SWITCH_VIDEO_NAME
+        new_idx = 1
         for if_src in order:
             desc = description_map.get(if_src)
             if desc is None:
@@ -2173,7 +2174,8 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
                 )
             if not desc:
                 desc = "N/A"
-            new_if = if_src  # se conserva el nombre original
+            new_if = _resolve_new_interface(NEW_IF_VIDEO_PREFIX, new_idx)
+            new_idx += 1
             rows.append([
                 host,
                 if_src,
