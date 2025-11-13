@@ -1302,6 +1302,9 @@ def parse_global_metadata(lines: List[str], iface_cfg_map: Dict[str, List[str]])
         or metadata.get("ntp_source")
     )
     metadata["management_interface"] = _guess_management_interface(iface_cfg_map, management_candidate)
+    metadata["video_management_interface"] = _guess_video_management_vlan(
+        iface_cfg_map, metadata["management_interface"]
+    )
 
     return metadata
 
@@ -1326,6 +1329,33 @@ def _guess_management_interface(
         return "Loopback0"
 
     return preferred
+
+
+def _guess_video_management_vlan(
+    iface_cfg_map: Dict[str, List[str]],
+    preferred: Optional[str],
+) -> Optional[str]:
+    if preferred:
+        short_pref = to_short_ifname(preferred)
+        if short_pref.lower().startswith("vlan9"):
+            return short_pref
+
+    candidates: List[str] = []
+    for ifname, block in iface_cfg_map.items():
+        short = to_short_ifname(ifname)
+        if not short.lower().startswith("vlan9"):
+            continue
+        if any(re.search(r"\bip address\b", ln, re.IGNORECASE) for ln in block):
+            candidates.append(short)
+
+    if candidates:
+        def _vlan_sort_key(name: str) -> Tuple[int, str]:
+            m = re.search(r"(\d+)", name)
+            return (int(m.group(1)) if m else 0, name)
+
+        return min(candidates, key=_vlan_sort_key)
+
+    return None
 
 
 def parse_video_interface_order(lines: List[str]) -> List[str]:
@@ -3217,8 +3247,22 @@ def _video_extra_base_lines(metadata: Dict[str, Any], *, level: str) -> List[str
         level_key = "2"
 
     mgmt_candidate = _short(metadata.get("management_interface"))
+    mgmt_vlan_candidate = _short(metadata.get("video_management_interface"))
+
+    def _pick_level2_mgmt() -> str:
+        for cand in (mgmt_candidate, mgmt_vlan_candidate):
+            if cand and cand.lower().startswith("vlan9"):
+                return cand
+        for cand in (mgmt_candidate, mgmt_vlan_candidate):
+            if cand and cand.lower().startswith("vlan"):
+                return cand
+        for cand in (mgmt_candidate, mgmt_vlan_candidate):
+            if cand:
+                return cand
+        return "Vlan9XX"
+
     if level_key == "2":
-        mgmt_if = mgmt_candidate or "Vlan9XX"
+        mgmt_if = _pick_level2_mgmt()
     else:
         mgmt_if = mgmt_candidate or "Loopback0"
 
