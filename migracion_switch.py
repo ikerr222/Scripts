@@ -1548,7 +1548,11 @@ def build_inventory_from_logs(filepaths: List[str]):
                 ):
                     _register_skip("never")
                     continue
-                if last_seconds is not None and last_seconds >= INACTIVITY_THRESHOLD_SECONDS:
+                if (
+                    last_seconds is not None
+                    and last_seconds >= INACTIVITY_THRESHOLD_SECONDS
+                    and status != "connected"
+                ):
                     _register_skip("inactive_threshold")
                     continue
 
