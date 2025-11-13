@@ -1829,14 +1829,17 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     reserve_after_voip = RESERVED_AFTER_VOIP if has_voip else 0
     tail_free = RESERVED_TAIL_FREE if (has_wifi or has_voip) else 0
 
-    core_slots = (
-        len(wifi_items)
-        + reserve_after_wifi
-        + len(voip_items)
-        + reserve_after_voip
-        + len(trunk_items)
-        + tail_free
-    )
+    def _current_core_slots() -> int:
+        return (
+            len(wifi_items)
+            + reserve_after_wifi
+            + len(voip_items)
+            + reserve_after_voip
+            + len(trunk_items)
+            + tail_free
+        )
+
+    core_slots = _current_core_slots()
     required_slots = core_slots
     if required_slots == 0 and ambar_others:
         max_stack_capacity = POE_MAX_PORTS * POE_MAX_STACK_MEMBERS
@@ -1872,13 +1875,40 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
 
     meta_info, total_usable = _build_meta(capacities)
 
+    preferred_member_limit = min(POE_MAX_STACK_MEMBERS, 2)
+
     while len(capacities) < POE_MAX_STACK_MEMBERS:
+        core_slots = _current_core_slots()
         usable_for_ambar = max(total_usable - core_slots, 0)
         if usable_for_ambar >= len(ambar_others):
             break
         remaining_needed = len(ambar_others) - usable_for_ambar
         if remaining_needed <= 0:
             break
+
+        if len(capacities) >= preferred_member_limit:
+            reclaimed = 0
+            if tail_free > 0 and remaining_needed > 0:
+                reclaim = min(remaining_needed, tail_free)
+                if reclaim:
+                    tail_free -= reclaim
+                    remaining_needed -= reclaim
+                    reclaimed += reclaim
+            if reserve_after_voip > 0 and remaining_needed > 0:
+                reclaim = min(remaining_needed, reserve_after_voip)
+                if reclaim:
+                    reserve_after_voip -= reclaim
+                    remaining_needed -= reclaim
+                    reclaimed += reclaim
+            if reserve_after_wifi > 0 and remaining_needed > 0:
+                reclaim = min(remaining_needed, reserve_after_wifi)
+                if reclaim:
+                    reserve_after_wifi -= reclaim
+                    remaining_needed -= reclaim
+                    reclaimed += reclaim
+            if reclaimed > 0:
+                continue
+
         next_capacity = (
             POE_MAX_PORTS
             if (len(capacities) + 1) < POE_MAX_STACK_MEMBERS or remaining_needed > POE_AUX_FINAL_PORTS
@@ -1909,6 +1939,8 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
 
     total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
 
+    core_slots = _current_core_slots()
+
     if core_slots > total_usable:
         deficit = core_slots - total_usable
         if tail_free > 0:
@@ -1923,14 +1955,7 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
             reclaim = min(deficit, reserve_after_wifi)
             reserve_after_wifi -= reclaim
             deficit -= reclaim
-        core_slots = (
-            len(wifi_items)
-            + reserve_after_wifi
-            + len(voip_items)
-            + reserve_after_voip
-            + len(trunk_items)
-            + tail_free
-        )
+        core_slots = _current_core_slots()
         if deficit > 0 or core_slots > total_usable:
             raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP/AMBAR/TRUNK configurados")
 
@@ -1941,6 +1966,7 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     voip_avoid   = [it for it in voip_items if it.get("avoid_uxm")]
 
     # AMBAR que caben en POE
+    core_slots = _current_core_slots()
     ambar_capacity = max(total_usable - core_slots, 0)
     ambar_for_poe = ambar_others[:ambar_capacity]
     ambar_overflow = ambar_others[ambar_capacity:]
