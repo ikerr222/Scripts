@@ -75,6 +75,28 @@ MANDATORY_POE_VLANS = {
     "3500",
     "357",
 }
+
+
+# --- Clasificación de elementos que requieren POE ---
+def _item_requires_poe_support(item: Dict[str, Any]) -> bool:
+    """Return True if the given mapping entry must stay on PoE hardware."""
+
+    vlan = str(item.get("vlan") or "").strip()
+    if vlan and vlan in MANDATORY_POE_VLANS:
+        return True
+
+    voice_vlan = item.get("voice_vlan")
+    if voice_vlan and str(voice_vlan) in MANDATORY_POE_VLANS:
+        return True
+
+    allowed_vlans = item.get("allowed_vlans") or []
+    for allowed in allowed_vlans:
+        vlan_value = str(allowed).strip()
+        if vlan_value and vlan_value in MANDATORY_POE_VLANS:
+            return True
+
+    return False
+
 UCA_VLANS  = {
     "3", "29", "134", "137", "138", "141", "142", "451", "453", "454", "455",
     "623", "2204", "2205", "2206", "2207", "2208", "2209", "2210", "2211", "2212",
@@ -1928,6 +1950,16 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     for it in ambar_for_poe:
         (ambar_slow if it.get("avoid_uxm") else ambar_primary).append(it)
 
+    def _split_by_poe_requirement(items: List[Dict[str, Any]]):
+        poe_required: List[Dict[str, Any]] = []
+        optional: List[Dict[str, Any]] = []
+        for entry in items:
+            (poe_required if _item_requires_poe_support(entry) else optional).append(entry)
+        return poe_required, optional
+
+    ambar_primary_poe, ambar_primary_optional = _split_by_poe_requirement(ambar_primary)
+    ambar_slow_poe, ambar_slow_optional = _split_by_poe_requirement(ambar_slow)
+
     trunk_primary = [it for it in trunk_items if not it.get("avoid_uxm")]
     trunk_avoid   = [it for it in trunk_items if it.get("avoid_uxm")]
 
@@ -1943,8 +1975,10 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
     sequence.extend(("ITEM", it) for it in voip_primary)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
-    sequence.extend(("ITEM", it) for it in ambar_primary)
-    sequence.extend(("AMBAR_SLOW", it) for it in ambar_slow)   # <-- aquí: antes de TRUNK
+    sequence.extend(("ITEM", it) for it in ambar_primary_poe)
+    sequence.extend(("ITEM", it) for it in ambar_primary_optional)
+    sequence.extend(("AMBAR_SLOW", it) for it in ambar_slow_poe)   # <-- aquí: antes de TRUNK
+    sequence.extend(("AMBAR_SLOW", it) for it in ambar_slow_optional)
     sequence.extend(("ITEM", it) for it in trunk_primary)
     if avoid_sequence:
         sequence.append(("FORCE_NEXT", None))
@@ -2056,6 +2090,8 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         if not isinstance(meta, dict):
             continue
         meta["type"] = role
+
+    _relocate_poe_trunks(rows)
 
     return rows, ambar_overflow
 
@@ -2304,6 +2340,68 @@ def _ensure_poe_downlink_trunk(
         "N/A",
         "POE",
     ]
+
+
+def _relocate_poe_trunks(rows: List[List[str]]) -> None:
+    """Move trunk entries to the last POE member so they end up at the tail ports."""
+
+    trunk_rows: List[Tuple[List[str], int, int, int]] = []
+    last_member: Optional[int] = None
+
+    for idx, row in enumerate(rows):
+        if not row or row[-1] != "POE":
+            continue
+        ifname = row[3] if len(row) > 3 else None
+        member_idx = _extract_member_index(ifname) if isinstance(ifname, str) else None
+        port_idx = _extract_if_index(ifname) if isinstance(ifname, str) else None
+        if member_idx is not None and (last_member is None or member_idx > last_member):
+            last_member = member_idx
+        origin = _origin_from_tag_string(row[8]) if len(row) > 8 else None
+        row_label = row[0] if row else ""
+        is_trunk = False
+        if isinstance(row_label, str) and row_label.upper() == "TRUNK":
+            is_trunk = True
+        elif origin == "TRUNK":
+            is_trunk = True
+        if is_trunk and member_idx is not None and port_idx is not None:
+            trunk_rows.append((list(row), idx, member_idx, port_idx))
+
+    if not trunk_rows or last_member is None:
+        return
+
+    candidate_slots: List[Tuple[int, int]] = []
+    for idx, row in enumerate(rows):
+        if not row or row[-1] != "POE":
+            continue
+        ifname = row[3] if len(row) > 3 else None
+        member_idx = _extract_member_index(ifname) if isinstance(ifname, str) else None
+        if member_idx != last_member:
+            continue
+        row_label = row[0] if row else ""
+        if not (isinstance(row_label, str) and row_label.upper() == "LIBRE"):
+            continue
+        port_idx = _extract_if_index(ifname) if isinstance(ifname, str) else None
+        if port_idx is None:
+            continue
+        candidate_slots.append((port_idx, idx))
+
+    if len(candidate_slots) < len(trunk_rows):
+        return
+
+    candidate_slots.sort(reverse=True)
+
+    for row_copy, original_idx, member_idx, port_idx in trunk_rows:
+        formatter = _poe_interface_formatter(member_idx)
+        sw_name = row_copy[5]
+        rows[original_idx] = _libre_row(formatter, port_idx, sw_name, "POE")
+
+    last_formatter = _poe_interface_formatter(last_member)
+    last_sw_name = _poe_switch_name_for_member(last_member)
+
+    for (row_copy, _, _, _), (port_idx, slot_idx) in zip(trunk_rows, candidate_slots):
+        row_copy[3] = _resolve_new_interface(last_formatter, port_idx)
+        row_copy[5] = last_sw_name
+        rows[slot_idx] = row_copy
 
 
 def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tuple[str, str], List[str]], Dict[str, Dict[str, Any]]]:
