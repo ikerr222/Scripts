@@ -725,6 +725,23 @@ def _poe_display_label(
     suffix = "P-UXM" if is_wifi else "P"
     return f"C9300-{label_size}{suffix}"
 
+
+def _video_display_label(interfaces: Iterable[str]) -> str:
+    """Return the display label for VIDEO stacks (always 24P or 48P)."""
+
+    max_port = 0
+    for ifname in interfaces:
+        if isinstance(ifname, str):
+            idx = _extract_if_index(ifname)
+            if idx and idx > max_port:
+                max_port = idx
+
+    if max_port and max_port <= 24:
+        return "C9300-24P"
+
+    # Default to 48P if no port information is available or it exceeds 24.
+    return "C9300-48P"
+
 # ---------- Parsers de los logs ----------
 
 EQUIPO_RE = re.compile(r"^\s*Equipo:\s*([A-Za-z0-9\-\._/]+)", re.IGNORECASE)
@@ -2292,6 +2309,12 @@ def export_excel(all_rows, out_dir, switch_number: Union[str, int]):
                         max_port = None
                     label_size = 24 if max_port and max_port <= 24 else 48
                     display_map[sw_name] = f"C9300-{label_size}T"
+            elif group_tag == "VIDEO":
+                for sw_name, grp in subset.groupby("SW Nuevo"):
+                    if grp.empty:
+                        continue
+                    interfaces = grp["Interface nuevo"].tolist()
+                    display_map[sw_name] = _video_display_label(interfaces)
 
             if display_map:
                 sheet_df["SW Nuevo"] = sheet_df["SW Nuevo"].map(lambda v: display_map.get(v, v))
@@ -3987,6 +4010,10 @@ def export_config_video(
     for row in rows_sorted:
         rows_by_switch.setdefault(row[5], []).append(row)
 
+    display_label_map = {
+        sw: _video_display_label([r[3] for r in grp]) for sw, grp in rows_by_switch.items()
+    }
+
     metadata_map = host_metadata or {}
     base_metadata: Dict[str, Any] = {}
     if rows_sorted:
@@ -4021,7 +4048,8 @@ def export_config_video(
             if location:
                 f.write(f"snmp-server location {location}\n")
             f.write("!\n")
-            f.write(f"! Interfaces para {sw_new}\n")
+            display_name = display_label_map.get(sw_new, sw_new)
+            f.write(f"! Interfaces para {display_name}\n")
             for sw_act, if_act, desc_act, if_new, desc_new, _sw_name, _vlan, _mode, _tags, _mac, _grupo in rows_by_switch[sw_new]:
                 block = iface_cfgs.get((sw_act, if_act))
                 f.write(f"interface {if_new}\n")
