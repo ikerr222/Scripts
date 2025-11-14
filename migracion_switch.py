@@ -4044,7 +4044,9 @@ def export_config_with_templates(
     if which in ("POE", "AMBAR_T"):
         default_gateway_override: Optional[str] = poe_default_gateway
     elif which == "UCA":
-        default_gateway_override = "10.192.129.254"
+        default_gateway_override = (
+            "10.192.131.254" if is_less_than_200 else "10.192.129.254"
+        )
     else:
         default_gateway_override = None
 
