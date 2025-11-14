@@ -1894,18 +1894,10 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
                     tail_free -= reclaim
                     remaining_needed -= reclaim
                     reclaimed += reclaim
-            if reserve_after_voip > 0 and remaining_needed > 0:
-                reclaim = min(remaining_needed, reserve_after_voip)
-                if reclaim:
-                    reserve_after_voip -= reclaim
-                    remaining_needed -= reclaim
-                    reclaimed += reclaim
-            if reserve_after_wifi > 0 and remaining_needed > 0:
-                reclaim = min(remaining_needed, reserve_after_wifi)
-                if reclaim:
-                    reserve_after_wifi -= reclaim
-                    remaining_needed -= reclaim
-                    reclaimed += reclaim
+            # Mantén siempre las reservas tras WIFI/VOIP: garantizan los puertos
+            # libres que el usuario necesita inmediatamente después de esos
+            # servicios críticos. Solo se puede reclamar tail_free para intentar
+            # ajustar la pila; si no basta, se añadirá un nuevo miembro.
             if reclaimed > 0:
                 continue
 
