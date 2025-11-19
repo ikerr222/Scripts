@@ -831,7 +831,9 @@ MAC_ROW_RE    = re.compile(
     r"(?P<type>STATIC|DYNAMIC)\s+(?P<port>.+?)\s*$", re.IGNORECASE
 )
 
-TIMESTAMP_PREFIX_RE = re.compile(r"^\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?\[\d{2}:\d{2}:\d{2}\]")
+TIMESTAMP_PREFIX_RE = re.compile(
+    r"^\s*(?:\d{1,2}/\d{1,2}(?:/\d{2,4})?\[\d{2}:\d{2}:\d{2}\]|\d{1,2}:\d{2}:\d{2})"
+)
 
 LINE_PROTOCOL_RE = re.compile(
     r"^\s*(?P<ifname>\S+)\s+is\s+\S+,\s+line\s+protocol\s+is\s+\S+",
