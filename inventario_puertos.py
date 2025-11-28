@@ -52,6 +52,14 @@ EXCEL_COLUMNS = [
 
 EXCEL_SHEET_NAME = "Actual"
 
+INTERFACE_PREFIX_ORDER = {
+    "Fa": 0,
+    "Gi": 1,
+    "Te": 2,
+    "Hu": 3,
+    "Po": 4,
+}
+
 
 # ---------------------------------------------------------------------------
 # PARSING: SHOW INTERFACE STATUS
@@ -116,6 +124,33 @@ def parse_interface_status_block(text: str) -> dict:
         idx += 1
 
     return result
+
+
+def _port_sort_key(port: str) -> tuple:
+    """Ordena puertos como Gi1/0/1, Gi1/0/2, Gi1/0/10 en orden natural."""
+
+    match = re.match(r"([A-Za-z]+)([0-9/]+)", port)
+    if match:
+        prefix, numeric_part = match.groups()
+    else:
+        prefix, numeric_part = port, ""
+
+    prefix_key = INTERFACE_PREFIX_ORDER.get(prefix[:2], len(INTERFACE_PREFIX_ORDER))
+
+    numeric_values: list[int | str] = []
+    if numeric_part:
+        for chunk in numeric_part.split("/"):
+            if chunk.isdigit():
+                numeric_values.append(int(chunk))
+            else:
+                numeric_values.append(chunk)
+
+    return (
+        prefix_key,
+        prefix,
+        tuple(numeric_values),
+        port,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -460,8 +495,8 @@ def parse_log_inventory(path: str):
     log_name = os.path.basename(path)
     hostname = parse_hostname(text, os.path.splitext(log_name)[0])
 
-    # ordenamos por nombre de interfaz (Gi1/0/1, Fa0/1, etc.)
-    for port in sorted(int_status.keys()):
+    # ordenamos por nombre de interfaz (Gi1/0/1, Fa0/1, etc.) con orden natural
+    for port in sorted(int_status.keys(), key=_port_sort_key):
         info = int_status[port]
         status = info["status"]
         vlan = info["vlan"]
