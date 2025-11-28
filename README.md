@@ -11,11 +11,11 @@ Herramienta en Python para generar un inventario sencillo de puertos a partir
 de logs de switches Cisco (`show interface status`, `show mac address-table`,
 `show run`, `show version`, etc.). El script produce un único Excel:
 
-- `Migración_<Estación>.xlsx`: Excel cuya pestaña "Actual" contiene las
+- `Migración_<Estación>_v1.0.xlsx`: Excel cuya pestaña "Actual" contiene las
   columnas `Hostname`, `Model`, `Port`, `Description`, `Estado`, `Cableado`,
   `VLANs`, `Last input/output`, `Migrar` y `MACs` (las MACs quedan al final). El nombre
   del fichero se calcula automáticamente a partir del texto común en los
-  nombres de los logs (por ejemplo, `Migración_Planetario.xlsx`). Entre cada
+  nombres de los logs (por ejemplo, `Migración_Planetario_v1.0.xlsx`). Entre cada
   dispositivo se intercala una fila azul que anuncia el siguiente log junto con
   su hostname detectado, modelo e IP. La cabecera permanece en la primera fila y
   la segunda línea de la hoja contiene la fila azul del primer dispositivo. Las

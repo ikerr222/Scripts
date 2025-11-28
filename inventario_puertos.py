@@ -7,7 +7,7 @@ show mac address-table, show ip int brief, show interfaces, show version).
 
 - Entrada: 1 o más ficheros .log con los comandos anteriores.
 - Salida:
-    * Migración_<Estación>.xlsx (nombre inferido de los logs)
+    * Migración_<Estación>_v1.0.xlsx (nombre inferido de los logs)
         Hoja "Actual" con columnas: Hostname, Model, Port, Description, Estado,
         Cableado, VLANs, Last input/output, Migrar y MACs (MACs queda al final).
         Entre dispositivos se insertan filas azules con el nombre del log
@@ -844,7 +844,7 @@ def main():
 
     # 3) Exportar Excel
     station_slug = sanitize_station_for_filename(station_name)
-    excel_filename = f"Migración_{station_slug}.xlsx"
+    excel_filename = f"Migración_{station_slug}_v1.0.xlsx"
 
     while True:
         excel_path = os.path.join(output_dir, excel_filename)
