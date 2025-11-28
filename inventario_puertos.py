@@ -9,10 +9,11 @@ show mac address-table, show ip int brief, show interfaces, show version).
 - Salida:
     * Migración_<Estación>.xlsx (nombre inferido de los logs)
         Hoja "Actual" con columnas: Hostname, Model, Port, Description, Estado,
-        VLANs, Last input/output, Migrar y MACs (MACs queda al final). Entre
-        dispositivos se insertan filas azules con el nombre del log siguiente,
-        su hostname detectado, modelo e IP, y la primera fila de la hoja queda
-        para los encabezados y la segunda para el banner azul del primer log.
+        Cableado, VLANs, Last input/output, Migrar y MACs (MACs queda al final).
+        Entre dispositivos se insertan filas azules con el nombre del log
+        siguiente, su hostname detectado, modelo e IP, y la primera fila de la
+        hoja queda para los encabezados y la segunda para el banner azul del
+        primer log.
 
 Uso:
     python inventario_puertos.py
@@ -42,6 +43,7 @@ EXCEL_COLUMNS = [
     "Port",
     "Description",
     "Estado",
+    "Cableado",
     "VLANs",
     "Last input/output",
     "Migrar",
@@ -200,6 +202,18 @@ def get_trunk_allowed_vlans(iface_cfgs: dict) -> dict:
             allowed = re.sub(r"\s", "", allowed)
             trunk_allowed[ifname] = allowed
     return trunk_allowed
+
+
+def extract_interface_descriptions(iface_cfgs: dict[str, str]) -> dict[str, str]:
+    """Obtiene las descripciones completas de cada interfaz del running-config."""
+
+    descriptions: dict[str, str] = {}
+    for ifname, cfg in iface_cfgs.items():
+        match = re.search(r"^\s*description\s+(.+)$", cfg, re.IGNORECASE | re.MULTILINE)
+        if match:
+            descriptions[ifname] = match.group(1).strip()
+
+    return descriptions
 
 
 def normalize_port_to_ifname(port: str) -> str:
@@ -436,6 +450,7 @@ def parse_log_inventory(path: str):
     mac_map = parse_mac_table_block(text)
     iface_cfgs = parse_interface_configs(text)
     trunk_allowed = get_trunk_allowed_vlans(iface_cfgs)
+    iface_descriptions = extract_interface_descriptions(iface_cfgs)
     management_ip = extract_management_ip(iface_cfgs)
     routed_ips = extract_routed_interface_ips(iface_cfgs)
     model = parse_device_model(text)
@@ -450,8 +465,8 @@ def parse_log_inventory(path: str):
         info = int_status[port]
         status = info["status"]
         vlan = info["vlan"]
-        description = info.get("name", "")
         ifname = normalize_port_to_ifname(port)
+        description = iface_descriptions.get(ifname, info.get("name", ""))
         routed_ip = routed_ips.get(ifname, "")
 
         # VLANs: si es trunk, sacamos las allowed; si no, usamos la VLAN de 'show int status'
@@ -481,6 +496,7 @@ def parse_log_inventory(path: str):
 
         is_routed = routed_ip != ""
         migrar_value = "Yes" if status_lower == "connected" and not is_routed else "No"
+        cableado_value = "Sí" if status_lower == "connected" else ""
 
         rows.append(
             {
@@ -489,6 +505,7 @@ def parse_log_inventory(path: str):
                 "Port": port,
                 "Description": description,
                 "Estado": estado,
+                "Cableado": cableado_value,
                 "VLANs": vlans_str,
                 "Last input/output": last_io_display,
                 "Migrar": migrar_value,
@@ -518,7 +535,8 @@ def export_to_excel(
 ):
     """
     Genera un Excel con columnas:
-        Hostname, Model, Port, Description, Estado, VLANs, Last input/output, Migrar, MACs
+        Hostname, Model, Port, Description, Estado, Cableado, VLANs,
+        Last input/output, Migrar, MACs
     La cabecera permanece en la primera fila y, si hay banner inicial, se inserta
     la fila azul justo debajo. Los índices indicados en separator_indices ya
     contienen la fila separadora correspondiente y aquí solo se colorean.
@@ -777,6 +795,7 @@ def build_separator_row(next_device: dict[str, str]) -> dict:
         "Port": "",
         "Description": f"Hostname: {hostname} | IP: {ip_display}",
         "Estado": "",
+        "Cableado": "",
         "VLANs": "",
         "Last input/output": "",
         "Migrar": "",

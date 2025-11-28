@@ -12,8 +12,8 @@ de logs de switches Cisco (`show interface status`, `show mac address-table`,
 `show run`, `show version`, etc.). El script produce un único Excel:
 
 - `Migración_<Estación>.xlsx`: Excel cuya pestaña "Actual" contiene las
-  columnas `Hostname`, `Model`, `Port`, `Description`, `Estado`, `VLANs`,
-  `Last input/output`, `Migrar` y `MACs` (las MACs quedan al final). El nombre
+  columnas `Hostname`, `Model`, `Port`, `Description`, `Estado`, `Cableado`,
+  `VLANs`, `Last input/output`, `Migrar` y `MACs` (las MACs quedan al final). El nombre
   del fichero se calcula automáticamente a partir del texto común en los
   nombres de los logs (por ejemplo, `Migración_Planetario.xlsx`). Entre cada
   dispositivo se intercala una fila azul que anuncia el siguiente log junto con
@@ -21,12 +21,15 @@ de logs de switches Cisco (`show interface status`, `show mac address-table`,
   la segunda línea de la hoja contiene la fila azul del primer dispositivo. Las
   interfaces enrutadas (`no switchport`) muestran el literal `routed` en la
   columna `VLANs` (para diferenciarlas de los puertos de acceso o trunk) y la
-  columna `Migrar` siempre indica `No` en ellas aunque estén `connected`. Las
-  interfaces con estado `notconnect` o `disabled` rellenan `Last input/output`
-  con los valores obtenidos en `show interfaces` para saber cuándo estuvieron
-  activas por última vez, y la columna `Migrar` marca `Yes` únicamente cuando
-  el puerto está `connected` y no es una interfaz enrutada; en cualquier otro
-  caso se muestra `No`.
+  columna `Migrar` siempre indica `No` en ellas aunque estén `connected`. La
+  nueva columna `Cableado` marca `Sí` únicamente cuando la interfaz está
+  `connected` (en cualquier otro estado queda vacía) y las descripciones se
+  extraen directamente de cada bloque `interface` del `show run`, por lo que no
+  se recortan como sucede en `show interface status`. Las interfaces con estado
+  `notconnect` o `disabled` rellenan `Last input/output` con los valores obtenidos
+  en `show interfaces` para saber cuándo estuvieron activas por última vez, y la
+  columna `Migrar` marca `Yes` únicamente cuando el puerto está `connected` y no
+  es una interfaz enrutada; en cualquier otro caso se muestra `No`.
 
 Requiere `pandas`. Al ejecutarlo, primero pregunta cómo quieres indicar los
 logs: puedes seguir introduciéndolos manualmente (uno por línea, reutilizando
