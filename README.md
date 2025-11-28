@@ -22,7 +22,7 @@ de logs de switches Cisco (`show interface status`, `show mac address-table`,
   interfaces enrutadas (`no switchport`) muestran el literal `routed` en la
   columna `VLANs` (para diferenciarlas de los puertos de acceso o trunk) y la
   columna `Migrar` siempre indica `No` en ellas aunque estén `connected`. La
-  nueva columna `Cableado` marca `Sí` únicamente cuando la interfaz está
+  nueva columna `Cableado` marca `Yes` únicamente cuando la interfaz está
   `connected` (en cualquier otro estado queda vacía) y las descripciones se
   extraen directamente de cada bloque `interface` del `show run`, por lo que no
   se recortan como sucede en `show interface status`. Las interfaces con estado

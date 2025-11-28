@@ -531,7 +531,7 @@ def parse_log_inventory(path: str):
 
         is_routed = routed_ip != ""
         migrar_value = "Yes" if status_lower == "connected" and not is_routed else "No"
-        cableado_value = "Sí" if status_lower == "connected" else ""
+        cableado_value = "Yes" if status_lower == "connected" else ""
 
         rows.append(
             {
