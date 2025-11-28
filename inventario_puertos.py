@@ -3,10 +3,11 @@
 
 """
 Inventario sencillo de puertos a partir de logs Cisco (show run, show interface status,
-show mac address-table, show ip int brief, show interfaces, show version).
+show mac address-table, show ip int brief, show interfaces, show version) y
+flujo inverso para generar un plan de migración desde un Excel ya cumplimentado.
 
-- Entrada: 1 o más ficheros .log con los comandos anteriores.
-- Salida:
+- Entrada (modo 1): 1 o más ficheros .log con los comandos anteriores.
+- Salida (modo 1):
     * Migración_<Estación>_v1.0.xlsx (nombre inferido de los logs)
         Hoja "Actual" con columnas: Hostname, Model, Port, Description, Estado,
         Cableado, VLANs, Last input/output, Migrar y MACs (MACs queda al final).
@@ -15,17 +16,23 @@ show mac address-table, show ip int brief, show interfaces, show version).
         hoja queda para los encabezados y la segunda para el banner azul del
         primer log.
 
+- Entrada (modo 2): un Excel ya rellenado (con las columnas anteriores y las
+  decisiones de "Cableado"/"Migrar")
+- Salida (modo 2):
+    * Un TXT con la configuración base y un resumen de asignaciones de puertos.
+    * Un Excel de migración que solo contiene los puertos marcados como
+      "Migrar=Yes", repartidos por dispositivos y con el puerto nuevo calculado
+      según el modelo elegido para cada hoja.
+
 Uso:
     python inventario_puertos.py
-    (el script primero pregunta si quieres introducir los logs manualmente o
-    indicar una carpeta con todos los .log. En modo manual puedes pegar rutas
-    completas una por línea; si no escribes ninguna, procesará los .log del
-    directorio actual. En modo carpeta solo necesitas pegar la ruta de la carpeta
-    (con o sin comillas) y se analizarán todos los .log que contenga. Después se
-    solicitará la carpeta destino donde se generarán los ficheros de salida, que
-    también puede estar fuera del proyecto y se crea si no existe. Si el Excel
-    final no puede escribirse (por ejemplo, porque esté abierto en otra
-    aplicación), el script avisará y permitirá reintentar o elegir otra ruta.)
+    (el script primero pregunta si quieres ejecutar el modo 1 (inventario desde
+    logs) o el modo 2 (plan de migración a partir de un Excel). En modo 1, se
+    solicita si los logs se introducen manualmente o por carpeta. En modo 2, se
+    pide la ruta del Excel y la carpeta donde guardar los nuevos ficheros. En
+    ambos casos la carpeta de salida puede estar fuera del proyecto y se crea si
+    no existe. Si el Excel final no puede escribirse, el script avisará y
+    permitirá reintentar o elegir otra ruta.)
 """
 
 import os
@@ -59,6 +66,17 @@ INTERFACE_PREFIX_ORDER = {
     "Hu": 3,
     "Po": 4,
 }
+
+MIGRATION_TYPE_CATALOG = {
+    "1": {"name": "5420M-16MW-32P-4YE", "ports": 52},
+    "2": {"name": "4120-24MW-4Y 2PSU", "ports": 28},
+    "3": {"name": "4120-24MW-4Y 1PSU", "ports": 28},
+    "4": {"name": "X435-8P-4S", "ports": 12},
+    "5": {"name": "16804", "ports": 12},
+    "6": {"name": "5420F-24S-4XE", "ports": 28},
+}
+
+BASE_CONFIG_TEMPLATE = """# Configuración base Extreme para la migración\n# (puedes ajustarla tras generarla automáticamente)\n\n#\n# Module devmgr configuration.\n#\nconfigure snmp sysName "{hostname}"\nconfigure snmp sysLocation "{station}_CC1"\nconfigure snmp sysContact "AXIANS"\nconfigure timezone name CET 60 autodst name CEST 60 begins every last sunday march at 2 0 ends every last sunday october at 3 0\n\n# Slots de ejemplo (ajusta según el modelo elegido)\nconfigure slot 1 module 5420M-16MW-32P-4YE\nconfigure sys-recovery-level slot 1 reset\nconfigure slot 2 module 5420M-16MW-32P-4YE\nconfigure sys-recovery-level slot 2 reset\nconfigure slot 3 module 5420F-24S-4XE\nconfigure sys-recovery-level slot 3 reset\n\n#\n# Module vlan configuration.\n#\nconfigure vlan default delete ports all\nconfigure vr VR-Default delete ports all\nconfigure vr VR-Default add ports all\ncreate vlan "GESTION"\nconfigure vlan GESTION tag 1000\ncreate vlan "OFIMATICA"\nconfigure vlan OFIMATICA tag 529\ncreate vlan "PCL"\nconfigure vlan PCL tag 561\ncreate vlan "SAIT-UPS"\nconfigure vlan SAIT-UPS tag 513\ncreate vlan "AUTOMATAS"\nconfigure vlan AUTOMATAS tag 514\ncreate vlan "CONTROL_ACCESO"\nconfigure vlan CONTROL_ACCESO tag 522\ncreate vlan "VOIP"\nconfigure vlan VOIP tag 552\n\n# Añade aquí el resto de VLANs que necesites\n\n#\n# Muestras de plantillas por puerto (añade/ajusta según el plan generado)\n#\n# configure port 1:1 description "ENLACE"\n# configure vlan OFIMATICA add ports 1:1 untagged\n\n#\n# Otras secciones de la plantilla original\n# (log, ntp, snmp, stp, etc.)\n#\n"""
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +623,193 @@ def export_to_excel(
 
 
 # ---------------------------------------------------------------------------
+# MIGRACIÓN DESDE EXCEL EXISTENTE
+# ---------------------------------------------------------------------------
+
+def prompt_primary_mode() -> str:
+    """Pregunta si se ejecutará el flujo de inventario o el de migración."""
+
+    prompt = (
+        "¿Qué modo quieres ejecutar?\n"
+        "  [1] Inventario desde logs (genera el Excel 'Actual').\n"
+        "  [2] Plan de migración desde un Excel ya cumplimentado.\n"
+        "Selecciona 1 o 2: "
+    )
+
+    while True:
+        choice = input(prompt).strip()
+        if choice == "1":
+            return "inventario"
+        if choice == "2":
+            return "migracion"
+        print("Opción no válida. Escribe 1 para inventario o 2 para migración.")
+
+
+def prompt_for_inventory_excel() -> str:
+    """Solicita la ruta del Excel de inventario ya cumplimentado."""
+
+    while True:
+        user_input = input("Introduce la ruta del Excel con el inventario: ").strip()
+        normalized = _normalize_user_path(user_input)
+        if not normalized:
+            print("Ruta no válida. Inténtalo de nuevo.")
+            continue
+
+        if not os.path.isfile(normalized):
+            print(f"No existe el fichero: {normalized}")
+            continue
+
+        return normalized
+
+
+def _load_inventory_dataframe(path: str) -> pd.DataFrame:
+    """Lee el Excel de inventario y devuelve solo las filas con un puerto válido."""
+
+    df = pd.read_excel(path, sheet_name=0)
+    df = df.fillna("")
+
+    if not set(EXCEL_COLUMNS).issubset(df.columns):
+        missing = set(EXCEL_COLUMNS) - set(df.columns)
+        raise ValueError(f"Faltan columnas en el Excel: {', '.join(sorted(missing))}")
+
+    df = df[df["Port"].astype(str).str.strip() != ""]
+    return df
+
+
+def _filter_migratable_rows(df: pd.DataFrame) -> list[dict]:
+    """Extrae filas marcadas con Migrar=Yes."""
+
+    rows: list[dict] = []
+    for _, row in df.iterrows():
+        migrar = str(row.get("Migrar", "")).strip().lower()
+        if migrar != "yes":
+            continue
+
+        port = str(row.get("Port", "")).strip()
+        if not port:
+            continue
+
+        rows.append({col: str(row.get(col, "")) for col in EXCEL_COLUMNS})
+
+    rows.sort(key=lambda r: (r.get("Hostname", ""), _port_sort_key(r.get("Port", ""))))
+    return rows
+
+
+def _group_rows_for_migration(rows: list[dict]) -> dict[str, list[dict]]:
+    """Agrupa las filas migrables en stacks y dispositivos individuales."""
+
+    grouped: dict[str, list[dict]] = {}
+    stack_planetario: list[dict] = []
+    stack_pcl: list[dict] = []
+
+    for row in rows:
+        hostname = row.get("Hostname", "")
+        upper = hostname.upper()
+        if "NA_PLANETARIO" in upper:
+            stack_planetario.append(row)
+            continue
+        if "NA_PCLPLANETARIO" in upper:
+            stack_pcl.append(row)
+            continue
+
+        grouped.setdefault(hostname or "Desconocido", []).append(row)
+
+    if stack_planetario:
+        grouped["Stack_NA_PLANETARIO"] = stack_planetario
+    if stack_pcl:
+        grouped["Stack_NA_PCLPLANETARIO"] = stack_pcl
+
+    return grouped
+
+
+def _prompt_target_model(sheet_name: str) -> dict:
+    """Pregunta qué modelo se usará para una hoja de migración."""
+
+    print(f"Selecciona el modelo destino para la hoja '{sheet_name}':")
+    for key, info in sorted(MIGRATION_TYPE_CATALOG.items()):
+        print(f"  [{key}] {info['name']} ({info['ports']} puertos)")
+
+    while True:
+        choice = input("Modelo (1-6): ").strip()
+        if choice in MIGRATION_TYPE_CATALOG:
+            return MIGRATION_TYPE_CATALOG[choice]
+        print("Opción no válida. Introduce un número entre 1 y 6.")
+
+
+def _assign_new_ports(rows: list[dict], model_info: dict) -> list[dict]:
+    """Asigna puertos nuevos secuenciales según la capacidad del modelo."""
+
+    port_capacity = model_info.get("ports", 0)
+    available_ports = [f"1:{idx}" for idx in range(1, port_capacity + 1)]
+
+    planned: list[dict] = []
+    for idx, row in enumerate(rows):
+        new_port = available_ports[idx] if idx < len(available_ports) else "SIN_PUERTO"
+        planned.append({**row, "Nuevo puerto": new_port, "Modelo destino": model_info.get("name", "")})
+
+    return planned
+
+
+def build_migration_plan(df: pd.DataFrame) -> dict[str, dict]:
+    """Construye el plan de migración por hoja con asignación de puertos."""
+
+    migratable_rows = _filter_migratable_rows(df)
+    if not migratable_rows:
+        raise ValueError("El Excel no contiene filas con Migrar=Yes y puerto válido.")
+
+    grouped = _group_rows_for_migration(migratable_rows)
+
+    plan: dict[str, dict] = {}
+    for sheet_name, rows in grouped.items():
+        model_info = _prompt_target_model(sheet_name)
+        planned_rows = _assign_new_ports(rows, model_info)
+        plan[sheet_name] = {"rows": planned_rows, "model": model_info}
+
+    return plan
+
+
+def export_migration_excel(plan: dict[str, dict], out_path: str):
+    """Genera el Excel de migración con una hoja por stack/dispositivo."""
+
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        for sheet_name, data in plan.items():
+            df = pd.DataFrame(data["rows"], columns=EXCEL_COLUMNS + ["Nuevo puerto", "Modelo destino"])
+            df.to_excel(writer, sheet_name=sheet_name[:31] or "Plan", index=False)
+
+    print(f"[OK] Plan de migración generado: {out_path}")
+
+
+def export_config_plan(plan: dict[str, dict], out_path: str, station: str):
+    """Genera un TXT con la plantilla base y el resumen de puertos."""
+
+    first_hostname = ""
+    for data in plan.values():
+        for row in data["rows"]:
+            first_hostname = row.get("Hostname", "Switch")
+            if first_hostname:
+                break
+        if first_hostname:
+            break
+
+    station_safe = station or "Estacion"
+    header = BASE_CONFIG_TEMPLATE.format(hostname=first_hostname or "Switch", station=station_safe)
+
+    lines = [header]
+    for sheet_name, data in plan.items():
+        lines.append(f"\n# === Plan {sheet_name} (modelo {data['model'].get('name', '')}) ===")
+        for row in data["rows"]:
+            lines.append(
+                f"- {row.get('Hostname', '')} {row.get('Port', '')} -> {row.get('Nuevo puerto', '')} "
+                f"({row.get('Description', '')}) VLANs={row.get('VLANs', '')} Estado={row.get('Estado', '')} "
+                f"Migrar={row.get('Migrar', '')}"
+            )
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print(f"[OK] Configuración TXT generada: {out_path}")
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
@@ -838,14 +1043,14 @@ def build_separator_row(next_device: dict[str, str]) -> dict:
     }
 
 
-def main():
-    # 1) Obtener lista de logs pidiendo por pantalla
+def run_inventory_mode():
+    """Flujo original: leer logs y generar el Excel de inventario."""
+
     log_paths = prompt_for_logs()
 
     station_name = infer_station_name(log_paths)
     print(f"[INFO] Estación detectada: {station_name}")
 
-    # 2) Solicitar carpeta de salida
     output_dir = prompt_for_output_directory()
 
     processed_logs: list[dict] = []
@@ -877,7 +1082,6 @@ def main():
 
         excel_rows.extend(rows)
 
-    # 3) Exportar Excel
     station_slug = sanitize_station_for_filename(station_name)
     excel_filename = f"Migración_{station_slug}_v1.0.xlsx"
 
@@ -897,6 +1101,57 @@ def main():
             print(f"[ERROR] No se pudo escribir '{excel_path}': {exc}")
             print("Revisa la ruta indicada o selecciona otra carpeta.")
             output_dir = prompt_retry_output_directory(output_dir)
+
+
+def run_migration_mode():
+    """Flujo nuevo: leer Excel existente y generar plan TXT + Excel."""
+
+    inventory_path = prompt_for_inventory_excel()
+    output_dir = prompt_for_output_directory()
+
+    try:
+        df = _load_inventory_dataframe(inventory_path)
+    except Exception as exc:
+        print(f"[ERROR] No se pudo leer el Excel: {exc}")
+        return
+
+    try:
+        plan = build_migration_plan(df)
+    except Exception as exc:
+        print(f"[ERROR] No se pudo generar el plan de migración: {exc}")
+        return
+
+    station_name = infer_station_name([inventory_path])
+    station_slug = sanitize_station_for_filename(station_name)
+
+    migration_excel = f"Plan_migracion_{station_slug}.xlsx"
+    config_txt = f"config_migracion_{station_slug}.txt"
+
+    while True:
+        excel_path = os.path.join(output_dir, migration_excel)
+        try:
+            export_migration_excel(plan, excel_path)
+            break
+        except PermissionError as exc:
+            print(f"[ERROR] No se pudo escribir '{excel_path}': {exc}")
+            output_dir = prompt_retry_output_directory(output_dir)
+        except OSError as exc:
+            print(f"[ERROR] No se pudo escribir '{excel_path}': {exc}")
+            output_dir = prompt_retry_output_directory(output_dir)
+
+    txt_path = os.path.join(output_dir, config_txt)
+    try:
+        export_config_plan(plan, txt_path, station_name)
+    except Exception as exc:
+        print(f"[ERROR] No se pudo generar el TXT: {exc}")
+
+
+def main():
+    mode = prompt_primary_mode()
+    if mode == "inventario":
+        run_inventory_mode()
+    else:
+        run_migration_mode()
 
 
 if __name__ == "__main__":
