@@ -9,12 +9,16 @@ flujo inverso para generar un plan de migración desde un Excel ya cumplimentado
 - Entrada (modo 1): 1 o más ficheros .log con los comandos anteriores.
 - Salida (modo 1):
     * Migración_<Estación>_v1.0.xlsx (nombre inferido de los logs)
-        Hoja "Actual" con columnas: Hostname, Model, Port, Description, Estado,
-        Cableado, VLANs, Last input/output, Migrar y MACs (MACs queda al final).
+        Hoja "Actual" con columnas: Hostname, Model, Stack, Port, Description,
+        Estado, Cableado, VLANs, Last input/output, Migrar y MACs (MACs queda
+        al final). El número de stack se obtiene del sufijo del nombre del log
+        (p.ej. *_1.log -> stack 1) y sirve también para el plan de migración.
         Entre dispositivos se insertan filas azules con el nombre del log
         siguiente, su hostname detectado, modelo e IP, y la primera fila de la
         hoja queda para los encabezados y la segunda para el banner azul del
         primer log.
+        Hoja "Stacks" con un resumen por dispositivo (SITE, DEVICE EXOS,
+        HOSTNAME, MGMT IP, STACK...), agrupada por número de stack.
 
 - Entrada (modo 2): un Excel ya rellenado (con las columnas anteriores y las
   decisiones de "Cableado"/"Migrar")
@@ -47,6 +51,7 @@ from openpyxl.styles import PatternFill
 EXCEL_COLUMNS = [
     "Hostname",
     "Model",
+    "Stack",
     "Port",
     "Description",
     "Estado",
@@ -55,6 +60,18 @@ EXCEL_COLUMNS = [
     "Last input/output",
     "Migrar",
     "MACs",
+]
+
+STACK_SUMMARY_COLUMNS = [
+    "SITE",
+    "DEVICE EXOS",
+    "PLANTA",
+    "SALA",
+    "HOSTNAME",
+    "MGMT IP STAGING",
+    "MGMT IP",
+    "STACK",
+    "SLOTS",
 ]
 
 EXCEL_SHEET_NAME = "Actual"
@@ -414,6 +431,14 @@ def sanitize_station_for_filename(station_name: str) -> str:
     return cleaned or "Estacion"
 
 
+def parse_stack_number(path: str) -> str:
+    """Extrae el número de stack del nombre del log (ej: *_1.log -> "1")."""
+
+    base = os.path.splitext(os.path.basename(path))[0]
+    match = re.search(r"_(\d+)\s*$", base)
+    return match.group(1) if match else ""
+
+
 def parse_hostname(text: str, default: str) -> str:
     """Obtiene el hostname del log (o usa un valor por defecto)."""
 
@@ -494,7 +519,7 @@ def parse_log_inventory(path: str):
     """
     Procesa un log y devuelve:
         rows: lista de dicts con columnas para el Excel
-        device_info: metadatos del dispositivo (log, hostname, ip, modelo)
+        device_info: metadatos del dispositivo (log, hostname, ip, modelo, stack)
     """
     with open(path, "r", errors="ignore") as f:
         text = f.read()
@@ -512,6 +537,7 @@ def parse_log_inventory(path: str):
     rows: list[dict] = []
     log_name = os.path.basename(path)
     hostname = parse_hostname(text, os.path.splitext(log_name)[0])
+    stack_id = parse_stack_number(log_name)
 
     # ordenamos por nombre de interfaz (Gi1/0/1, Fa0/1, etc.) con orden natural
     for port in sorted(int_status.keys(), key=_port_sort_key):
@@ -555,6 +581,7 @@ def parse_log_inventory(path: str):
             {
                 "Hostname": hostname,
                 "Model": model,
+                "Stack": stack_id,
                 "Port": port,
                 "Description": description,
                 "Estado": estado,
@@ -571,6 +598,7 @@ def parse_log_inventory(path: str):
         "hostname": hostname,
         "ip": management_ip,
         "model": model,
+        "stack": stack_id,
     }
 
     return rows, device_info
@@ -585,6 +613,7 @@ def export_to_excel(
     out_path: str,
     separator_indices: list[int],
     first_banner: dict | None,
+    stack_summary: list[dict] | None = None,
 ):
     """
     Genera un Excel con columnas:
@@ -618,6 +647,10 @@ def export_to_excel(
             excel_row = idx + 2 + banner_offset  # cabecera incluida
             for col_idx in range(1, len(EXCEL_COLUMNS) + 1):
                 ws.cell(row=excel_row, column=col_idx).fill = fill
+
+        if stack_summary:
+            stack_df = pd.DataFrame(stack_summary, columns=STACK_SUMMARY_COLUMNS)
+            stack_df.to_excel(writer, index=False, sheet_name="Stacks")
 
     print(f"[OK] Excel generado: {out_path}")
 
@@ -691,7 +724,13 @@ def _filter_migratable_rows(df: pd.DataFrame) -> list[dict]:
 
         rows.append({col: str(row.get(col, "")) for col in EXCEL_COLUMNS})
 
-    rows.sort(key=lambda r: (r.get("Hostname", ""), _port_sort_key(r.get("Port", ""))))
+    rows.sort(
+        key=lambda r: (
+            r.get("Stack", ""),
+            r.get("Hostname", ""),
+            _port_sort_key(r.get("Port", "")),
+        )
+    )
     return rows
 
 
@@ -699,25 +738,26 @@ def _group_rows_for_migration(rows: list[dict]) -> dict[str, list[dict]]:
     """Agrupa las filas migrables en stacks y dispositivos individuales."""
 
     grouped: dict[str, list[dict]] = {}
-    stack_planetario: list[dict] = []
-    stack_pcl: list[dict] = []
+
+    stacks: dict[str, list[dict]] = defaultdict(list)
+    singles: list[dict] = []
 
     for row in rows:
-        hostname = row.get("Hostname", "")
-        upper = hostname.upper()
-        if "NA_PLANETARIO" in upper:
-            stack_planetario.append(row)
-            continue
-        if "NA_PCLPLANETARIO" in upper:
-            stack_pcl.append(row)
+        stack_id = str(row.get("Stack", "")).strip()
+        if stack_id:
+            stacks[stack_id].append(row)
             continue
 
-        grouped.setdefault(hostname or "Desconocido", []).append(row)
+        hostname = row.get("Hostname", "") or "Desconocido"
+        singles.append({"group": hostname, "row": row})
 
-    if stack_planetario:
-        grouped["Stack_NA_PLANETARIO"] = stack_planetario
-    if stack_pcl:
-        grouped["Stack_NA_PCLPLANETARIO"] = stack_pcl
+    for stack_id, stack_rows in sorted(
+        stacks.items(), key=lambda item: (int(item[0]) if item[0].isdigit() else 9999, item[0])
+    ):
+        grouped[f"Stack_{stack_id}"] = stack_rows
+
+    for item in singles:
+        grouped.setdefault(item["group"], []).append(item["row"])
 
     return grouped
 
@@ -1028,12 +1068,14 @@ def build_separator_row(next_device: dict[str, str]) -> dict:
     ip_display = next_device.get("ip") or "IP no detectada"
     hostname = next_device.get("hostname", "")
     log_name = next_device.get("log_name", "")
+    stack_id = next_device.get("stack") or ""
 
     return {
         "Hostname": f"Log: {log_name}",
         "Model": next_device.get("model", ""),
+        "Stack": stack_id,
         "Port": "",
-        "Description": f"Hostname: {hostname} | IP: {ip_display}",
+        "Description": f"Hostname: {hostname} | IP: {ip_display} | Stack: {stack_id or 'N/A'}",
         "Estado": "",
         "Cableado": "",
         "VLANs": "",
@@ -1041,6 +1083,38 @@ def build_separator_row(next_device: dict[str, str]) -> dict:
         "Migrar": "",
         "MACs": "",
     }
+
+
+def build_stack_summary(processed_devices: list[dict], station: str) -> list[dict]:
+    """Crea las filas de la hoja de stacks agrupando por número de stack."""
+
+    rows: list[dict] = []
+    for device in processed_devices:
+        meta = device.get("metadata", {})
+        rows.append(
+            {
+                "SITE": station,
+                "DEVICE EXOS": meta.get("model", ""),
+                "PLANTA": "",
+                "SALA": "",
+                "HOSTNAME": meta.get("hostname", ""),
+                "MGMT IP STAGING": meta.get("ip", ""),
+                "MGMT IP": meta.get("ip", ""),
+                "STACK": meta.get("stack", ""),
+                "SLOTS": "",
+            }
+        )
+
+    def _stack_sort_key(row: dict) -> tuple:
+        raw = str(row.get("STACK", "")).strip()
+        try:
+            num = int(raw)
+        except ValueError:
+            num = float("inf")
+        return (num, row.get("HOSTNAME", ""))
+
+    rows.sort(key=_stack_sort_key)
+    return rows
 
 
 def run_inventory_mode():
@@ -1067,6 +1141,7 @@ def run_inventory_mode():
     excel_rows: list[dict] = []
     separator_indices: list[int] = []
     first_banner: dict | None = None
+    stack_summary_rows: list[dict] = build_stack_summary(processed_logs, station_name)
 
     for device in processed_logs:
         rows = device["rows"]
@@ -1088,7 +1163,13 @@ def run_inventory_mode():
     while True:
         excel_path = os.path.join(output_dir, excel_filename)
         try:
-            export_to_excel(excel_rows, excel_path, separator_indices, first_banner)
+            export_to_excel(
+                excel_rows,
+                excel_path,
+                separator_indices,
+                first_banner,
+                stack_summary_rows,
+            )
             break
         except PermissionError as exc:
             print(f"[ERROR] No se pudo escribir '{excel_path}': {exc}")
