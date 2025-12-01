@@ -1568,6 +1568,10 @@ def build_inventory_from_logs(filepaths: List[str]):
     for fp in filepaths:
         host, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map, metadata = parse_log(fp)
 
+        canonical_host = metadata.get("hostname") or host
+        metadata["hostname"] = canonical_host
+        host = canonical_host
+
         host_metadata[host] = metadata
 
         # Guarda bloques running por interfaz
@@ -2432,6 +2436,10 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
     for fp in video_logs:
         host, int_rows, _mac_map, _voice_map, iface_cfg_map, _last_io_map, metadata = parse_log(fp)
 
+        canonical_host = metadata.get("hostname") or host
+        metadata["hostname"] = canonical_host
+        host = canonical_host
+
         metadata_map[host] = metadata
 
         for if_short, block in iface_cfg_map.items():
@@ -2506,7 +2514,12 @@ def _sort_group_rows(rows: List[List[str]]) -> None:
 
 # ---------- Excel ----------
 
-def export_excel(all_rows, out_dir, switch_number: Union[str, int]):
+def export_excel(
+    all_rows,
+    out_dir,
+    switch_number: Union[str, int],
+    skipped_ports: Optional[List[Dict[str, Any]]] = None,
+):
     switch_suffix = str(switch_number).strip()
     if not switch_suffix:
         switch_suffix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -2640,59 +2653,65 @@ def export_excel(all_rows, out_dir, switch_number: Union[str, int]):
             col_index = sheet_df.columns.get_loc("_Grupo")
             ws.set_column(col_index, col_index, None, None, {'hidden': True})
 
+        if skipped_ports:
+            reason_text_map = {
+                "status_not_connected": "Estado distinto de 'connected' sin actividad reciente.",
+                "never": "La interfaz reporta 'Last input/Output never'.",
+                "inactive_threshold": (
+                    "Inactividad superior a aproximadamente "
+                    f"{INACTIVITY_THRESHOLD_SECONDS // 86400} días."
+                ),
+            }
+
+            removed_records = []
+            for entry in skipped_ports:
+                hostname = entry.get("hostname") or entry.get("host") or "N/A"
+                port = entry.get("port") or "N/A"
+                alias = entry.get("name") or ""
+                status = entry.get("status") or "N/A"
+                last_raw = entry.get("last_raw") or "N/D"
+                output_raw = entry.get("output_raw") or "N/D"
+                last_seconds = entry.get("last_seconds")
+                reason_code = entry.get("reason") or ""
+                reason_text = reason_text_map.get(reason_code, reason_code)
+                days = ""
+                if isinstance(last_seconds, (int, float)) and last_seconds:
+                    days = f"{last_seconds / 86400:.1f}"
+
+                removed_records.append(
+                    {
+                        "Hostname": hostname,
+                        "Puerto": port,
+                        "Alias": alias,
+                        "Estado": status,
+                        "Last input": last_raw,
+                        "Output": output_raw,
+                        "Inactividad (días)": days,
+                        "Motivo": reason_text,
+                    }
+                )
+
+            removed_df = pd.DataFrame(
+                removed_records,
+                columns=[
+                    "Hostname",
+                    "Puerto",
+                    "Alias",
+                    "Estado",
+                    "Last input",
+                    "Output",
+                    "Inactividad (días)",
+                    "Motivo",
+                ],
+            )
+            removed_df.sort_values(by=["Hostname", "Puerto"], inplace=True)
+            removed_df.to_excel(w, sheet_name="Puertos Eliminados", index=False)
+            ws_removed = w.sheets["Puertos Eliminados"]
+            ws_removed.set_row(0, None, fmt_header)
+            ws_removed.set_column("A:H", None, wb.add_format({'num_format': '@'}))
+
 
     return xlsx
-
-
-def export_removed_ports_report(
-    skipped_ports: List[Dict[str, Any]],
-    out_dir: str,
-    switch_number: Union[str, int],
-) -> str:
-    switch_suffix = str(switch_number).strip() or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    txt_path = os.path.join(out_dir, f"{switch_suffix}_Puertos_Eliminados.txt")
-
-    reason_text_map = {
-        "status_not_connected": "Estado distinto de 'connected' sin actividad reciente.",
-        "never": "La interfaz reporta 'Last input/Output never'.",
-        "inactive_threshold": (
-            "Inactividad superior a aproximadamente "
-            f"{INACTIVITY_THRESHOLD_SECONDS // 86400} días."
-        ),
-    }
-
-    with open(txt_path, "w", encoding="utf-8") as f:
-        if not skipped_ports:
-            f.write("No se eliminaron puertos por inactividad o desconexión.\n")
-            return txt_path
-
-        f.write("Puertos descartados por inactividad o estado desconectado:\n\n")
-        for entry in skipped_ports:
-            hostname = entry.get("hostname") or entry.get("host") or "N/A"
-            port = entry.get("port") or "N/A"
-            status = entry.get("status") or "N/A"
-            alias = entry.get("name") or ""
-            last_raw = entry.get("last_raw") or "N/D"
-            output_raw = entry.get("output_raw") or "N/D"
-            last_seconds = entry.get("last_seconds")
-            reason_code = entry.get("reason") or ""
-            reason_text = reason_text_map.get(reason_code, reason_code)
-
-            f.write(f"Hostname origen: {hostname}\n")
-            f.write(f"Puerto: {port}\n")
-            if alias:
-                f.write(f"  Alias (show int status): {alias}\n")
-            f.write(f"  Estado: {status}\n")
-            f.write(f"  Last input: {last_raw}\n")
-            f.write(f"  Output: {output_raw}\n")
-            if isinstance(last_seconds, (int, float)) and last_seconds:
-                days = last_seconds / 86400
-                f.write(f"  Inactividad aproximada: {days:.1f} días\n")
-            if reason_text:
-                f.write(f"  Motivo: {reason_text}\n")
-            f.write("\n")
-
-    return txt_path
 
 
 # ---------- Plantillas base + export de configs ----------
@@ -4652,8 +4671,7 @@ if __name__ == "__main__":
     out_dir = r"X:\\AENA\\Postventa\\2024\\OP046517 Renovacion Acceso AO Barcelona\\3 Documentación\\33 TIC\\Migraciones\\SalidaScript"
     os.makedirs(out_dir, exist_ok=True)
 
-    xlsx_path = export_excel(all_rows, out_dir, switch_number)
-    removed_ports_path = export_removed_ports_report(skipped_ports, out_dir, switch_number)
+    xlsx_path = export_excel(all_rows, out_dir, switch_number, skipped_ports=skipped_ports)
 
     hostname_plan = build_hostname_plan(
         host_metadata,
@@ -4718,7 +4736,6 @@ if __name__ == "__main__":
                 label = name_labels.get(key, key)
                 print(f"    {label}: {hostname_plan[key]}")
     print(f"  Excel: {os.path.abspath(xlsx_path)}")
-    print(f"  Puertos eliminados: {os.path.abspath(removed_ports_path)}")
     print(f"  Config POE:     {os.path.abspath(cfg_poe)}")
     if cfg_amb_t:
         print(f"  Config AMBAR-T: {os.path.abspath(cfg_amb_t)}")
