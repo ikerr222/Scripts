@@ -4563,6 +4563,18 @@ def prompt_switch_number() -> int:
             continue
         return value
 
+def ensure_output_dir(path: str) -> str:
+    path = sanitize_path(path)
+    try:
+        os.makedirs(path, exist_ok=True)
+        return path
+    except OSError as exc:
+        fallback = os.path.join(os.getcwd(), "SalidaScript")
+        print(f"  - Aviso: no se pudo crear la ruta de salida '{path}'. ({exc})")
+        print(f"    Se usará la ruta local: {fallback}")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
 # ---------- Main ----------
 
 if __name__ == "__main__":
@@ -4668,8 +4680,9 @@ if __name__ == "__main__":
 
     all_rows = wifi_poe_rows + non_wifi_poe_rows + ambar_t_rows + uca_rows + video_rows
 
-    out_dir = r"X:\\AENA\\Postventa\\2024\\OP046517 Renovacion Acceso AO Barcelona\\3 Documentación\\33 TIC\\Migraciones\\SalidaScript"
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = ensure_output_dir(
+        r"X:\\AENA\\Postventa\\2024\\OP046517 Renovacion Acceso AO Barcelona\\3 Documentación\\33 TIC\\Migraciones\\SalidaScript"
+    )
 
     xlsx_path = export_excel(all_rows, out_dir, switch_number, skipped_ports=skipped_ports)
 
