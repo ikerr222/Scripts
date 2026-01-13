@@ -2434,7 +2434,7 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
     metadata_map: Dict[str, Dict[str, Any]] = {}
 
     for fp in video_logs:
-        host, int_rows, _mac_map, _voice_map, iface_cfg_map, _last_io_map, metadata = parse_log(fp)
+        host, int_rows, mac_map, _voice_map, iface_cfg_map, _last_io_map, metadata = parse_log(fp)
 
         canonical_host = metadata.get("hostname") or host
         metadata["hostname"] = canonical_host
@@ -2471,6 +2471,8 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
                 )
             if not desc:
                 desc = "N/A"
+            macs = mac_map.get(if_src) or []
+            mac_value = ";".join(macs) if macs else "N/A"
             new_if = _resolve_new_interface(NEW_IF_VIDEO_PREFIX, new_idx)
             new_idx += 1
             rows.append([
@@ -2483,7 +2485,7 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
                 "ROUTED",
                 "l3",
                 "N/A",
-                "N/A",
+                mac_value,
                 "VIDEO",
             ])
 
