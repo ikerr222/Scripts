@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import unicodedata
+from collections import Counter
 from datetime import datetime
 from typing import Iterable, List, Dict, Tuple, Optional, Callable, Union, Set, Any
 
@@ -37,6 +38,65 @@ DEFAULT_SNMP_CONTACT = "dmanau@aena.es"
 # --- Conjuntos de VLAN objetivo ---
 WIFI_VLANS = {"360", "361"}
 VOIP_VLANS = {"1211", "1223", "1225", "1226", "1227", "1228", "1229"}
+MANDATORY_POE_VLANS = {
+    "66",
+    "114",
+    "143",
+    "144",
+    "218",
+    "219",
+    "287",
+    "325",
+    "330",
+    "331",
+    "360",
+    "361",
+    "380",
+    "382",
+    "383",
+    "384",
+    "385",
+    "386",
+    "388",
+    "389",
+    "390",
+    "391",
+    "393",
+    "394",
+    "410",
+    "462",
+    "467",
+    "469",
+    "1225",
+    "1226",
+    "1227",
+    "1228",
+    "1229",
+    "3500",
+    "357",
+}
+
+
+# --- Clasificación de elementos que requieren POE ---
+def _item_requires_poe_support(item: Dict[str, Any]) -> bool:
+    """Return True if the given mapping entry must stay on PoE hardware."""
+
+    vlan = str(item.get("vlan") or "").strip()
+    if vlan and vlan in MANDATORY_POE_VLANS:
+        return True
+
+    voice_vlan = item.get("voice_vlan")
+    if voice_vlan and str(voice_vlan) in MANDATORY_POE_VLANS:
+        return True
+
+    allowed_vlans = item.get("allowed_vlans") or []
+    for allowed in allowed_vlans:
+        vlan_value = str(allowed).strip()
+        if vlan_value and vlan_value in MANDATORY_POE_VLANS:
+            return True
+
+    return False
+
 UCA_VLANS  = {
     "3", "29", "134", "137", "138", "141", "142", "451", "453", "454", "455",
     "623", "2204", "2205", "2206", "2207", "2208", "2209", "2210", "2211", "2212",
@@ -665,6 +725,93 @@ UCA_EXTRA_TEMPLATE_DEFAULT   = "uca_config_base_extra.txt"
 # --- Estado dinámico del mapeo POE ---
 POE_MEMBER_METADATA: Dict[int, Dict[str, object]] = {}
 
+
+def _poe_member_meta_by_name(sw_name: str) -> Optional[Dict[str, object]]:
+    """Return the POE member metadata associated to ``sw_name`` if available."""
+
+    for info in POE_MEMBER_METADATA.values():
+        if str(info.get("sw_name")) == sw_name:
+            return info
+    return None
+
+
+def _poe_display_label(
+    sw_name: str,
+    *,
+    interfaces: Optional[Iterable[str]] = None,
+    tags: Optional[Iterable[str]] = None,
+    meta_by_name: Optional[Dict[str, Dict[str, object]]] = None,
+) -> str:
+    """Return the human friendly label for a POE stack member."""
+
+    meta: Optional[Dict[str, object]] = None
+    if meta_by_name is not None:
+        meta = meta_by_name.get(sw_name)
+    if meta is None:
+        meta = _poe_member_meta_by_name(sw_name)
+
+    capacity: Optional[int] = None
+    member_type = ""
+
+    if meta:
+        raw_capacity = meta.get("capacity")
+        try:
+            capacity = int(raw_capacity) if raw_capacity is not None else None
+        except (TypeError, ValueError):
+            capacity = None
+        raw_type = meta.get("type")
+        if isinstance(raw_type, str):
+            member_type = raw_type.lower()
+
+    is_wifi = member_type == "wifi"
+    is_data_only = member_type == "data"
+
+    if capacity is None and interfaces:
+        max_port = 0
+        for ifname in interfaces:
+            if isinstance(ifname, str):
+                idx = _extract_if_index(ifname)
+                if idx and idx > max_port:
+                    max_port = idx
+        if max_port:
+            capacity = 24 if max_port <= 24 else 48
+
+    if capacity is None:
+        capacity = 48
+
+    if not is_wifi and member_type != "data" and tags:
+        for tag in tags:
+            if isinstance(tag, str) and "ORIGIN=WIFI" in tag.upper():
+                is_wifi = True
+                break
+
+    if is_wifi:
+        suffix = "P-UXM"
+    elif is_data_only:
+        suffix = "T"
+    else:
+        suffix = "P"
+
+    label_size = 24 if capacity <= 24 else 48
+    return f"C9300-{label_size}{suffix}"
+
+
+def _video_display_label(interfaces: Iterable[str]) -> str:
+    """Return the display label for VIDEO stacks (always 24P or 48P)."""
+
+    max_port = 0
+    for ifname in interfaces:
+        if isinstance(ifname, str):
+            idx = _extract_if_index(ifname)
+            if idx and idx > max_port:
+                max_port = idx
+
+    if max_port and max_port <= 24:
+        return "C9300-24P"
+
+    # Default to 48P if no port information is available or it exceeds 24.
+    return "C9300-48P"
+
 # ---------- Parsers de los logs ----------
 
 EQUIPO_RE = re.compile(r"^\s*Equipo:\s*([A-Za-z0-9\-\._/]+)", re.IGNORECASE)
@@ -684,7 +831,9 @@ MAC_ROW_RE    = re.compile(
     r"(?P<type>STATIC|DYNAMIC)\s+(?P<port>.+?)\s*$", re.IGNORECASE
 )
 
-TIMESTAMP_PREFIX_RE = re.compile(r"^\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?\[\d{2}:\d{2}:\d{2}\]")
+TIMESTAMP_PREFIX_RE = re.compile(
+    r"^\s*(?:\d{1,2}/\d{1,2}(?:/\d{2,4})?\[\d{2}:\d{2}:\d{2}\]|\d{1,2}:\d{2}:\d{2})"
+)
 
 LINE_PROTOCOL_RE = re.compile(
     r"^\s*(?P<ifname>\S+)\s+is\s+\S+,\s+line\s+protocol\s+is\s+\S+",
@@ -702,6 +851,7 @@ VOICE_VLAN_RE  = re.compile(r"^\s*switchport\s+voice\s+vlan\s+(\d+)", re.IGNOREC
 SNMP_LOCATION_RE         = re.compile(r"^\s*snmp-server\s+location\s+(.+)$", re.IGNORECASE)
 SNMP_CONTACT_RE          = re.compile(r"^\s*snmp-server\s+contact\s+(.+)$", re.IGNORECASE)
 IP_DEFAULT_GATEWAY_RE    = re.compile(r"^\s*ip\s+default-gateway\s+(\S+)", re.IGNORECASE)
+DEFAULT_GATEWAY_LINE_RE  = re.compile(r"^(\s*ip\s+default-gateway\s+)(\S+)(.*)$", re.IGNORECASE)
 IP_PIM_REGISTER_RE       = re.compile(r"^\s*ip\s+pim\s+register-source\s+(\S+)", re.IGNORECASE)
 IP_PIM_RP_RE             = re.compile(r"^\s*ip\s+pim\s+rp-address\s+.+$", re.IGNORECASE)
 IP_TFTP_SOURCE_RE        = re.compile(r"^\s*ip\s+tftp\s+source-interface\s+(\S+)", re.IGNORECASE)
@@ -722,8 +872,15 @@ IP_INT_BRIEF_ROW_RE = re.compile(
 )
 
 # --- Filtros de seguridad / parsing ---
-STICKY_LINE_RE   = re.compile(r"^\s*switchport\s+port-?security.*sticky\b", re.IGNORECASE)
-BASE_HOSTNAME_RE = re.compile(r"^\s*hostname\s+\S+", re.IGNORECASE)
+STICKY_LINE_RE        = re.compile(r"^\s*switchport\s+port-?security.*sticky\b", re.IGNORECASE)
+BASE_HOSTNAME_RE      = re.compile(r"^\s*hostname\s+\S+", re.IGNORECASE)
+HOSTNAME_CAPTURE_RE   = re.compile(r"^\s*hostname\s+(\S+)", re.IGNORECASE)
+HOSTNAME_TOKEN_RE     = re.compile(
+    r"(?P<center>\d{3})C\d{3,4}G-(?P<rack>\d{4})(?P<u>\d{2})?(?P<suffix>[A-Za-z0-9]{0,2})",
+    re.IGNORECASE,
+)
+LOCATION_RACK_RE      = re.compile(r"R\s*(\d{2})(\d{2})", re.IGNORECASE)
+LOCATION_U_RE         = re.compile(r"U\s*(\d{2})", re.IGNORECASE)
 
 # ---------- Utilidades ----------
 
@@ -747,6 +904,9 @@ def to_short_ifname(ifname: str) -> str:
 
 def normalize_port(p: str) -> str:
     p = p.strip()
+    m = re.search(r"(Vl|Vlan)\s*(\d+)", p, re.IGNORECASE)
+    if m:
+        return f"Vlan{m.group(2)}"
     m = re.search(r"(Fa|Gi|Te|Tw|Twe)\d+(?:/\d+){0,2}", p, re.IGNORECASE)
     return m.group(0) if m else ""
 
@@ -767,6 +927,131 @@ def _format_numbered_name(base_name: str, ordinal: int) -> str:
         return f"{m.group(1)}{ordinal:0{width}d}"
     base = base_name.rstrip("-")
     return f"{base}-{ordinal:02d}" if base else f"{ordinal:02d}"
+
+
+def _extract_hostname_tokens(value: str) -> Optional[Dict[str, Optional[str]]]:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.strip("[]")
+    match = HOSTNAME_TOKEN_RE.search(cleaned)
+    if not match:
+        return None
+    rack = match.group("rack") or ""
+    if len(rack) > 4:
+        rack = rack[:4]
+    tokens: Dict[str, Optional[str]] = {
+        "center": match.group("center"),
+        "rack": rack,
+        "u": match.group("u"),
+        "suffix": match.group("suffix"),
+    }
+    return tokens
+
+
+def _extract_location_tokens(value: Optional[str]) -> Dict[str, Optional[str]]:
+    if not value:
+        return {}
+    rack_match = LOCATION_RACK_RE.search(value)
+    u_match = LOCATION_U_RE.search(value)
+    tokens: Dict[str, Optional[str]] = {}
+    if rack_match:
+        tokens["rack"] = f"{rack_match.group(1)}{rack_match.group(2)}"
+    if u_match:
+        tokens["u"] = u_match.group(1)
+    return tokens
+
+
+def _choose_hostname_prefix(
+    metadata: Dict[str, Dict[str, Any]],
+    switch_number: Union[int, str],
+) -> Tuple[str, str]:
+    center_candidates: Counter = Counter()
+    rack_candidates: Counter = Counter()
+
+    for meta in metadata.values():
+        host_value = meta.get("hostname") or meta.get("host")
+        tokens = _extract_hostname_tokens(host_value) if host_value else None
+        if tokens:
+            if tokens.get("center"):
+                center_candidates[tokens["center"]] += 1
+            if tokens.get("rack"):
+                rack_candidates[tokens["rack"]] += 1
+        loc_tokens = _extract_location_tokens(meta.get("snmp_location"))
+        if loc_tokens.get("rack"):
+            rack_candidates[loc_tokens["rack"]] += 1
+
+    def _resolve(counter: Counter, default: str) -> str:
+        if not counter:
+            return default
+        most_common = counter.most_common(1)[0][0]
+        return most_common
+
+    switch_str = str(switch_number).strip()
+    try:
+        switch_int = int(switch_str)
+    except ValueError:
+        switch_int = None
+
+    if switch_int is not None and switch_int < 1000:
+        default_center = f"{switch_int:03d}"
+    else:
+        default_center = switch_str or "000"
+
+    center = _resolve(center_candidates, default_center)
+
+    if not rack_candidates:
+        # Fallback: derive rack from the first hostname tokens if possible
+        for meta in metadata.values():
+            host_value = meta.get("hostname") or meta.get("host")
+            tokens = _extract_hostname_tokens(host_value) if host_value else None
+            if tokens and tokens.get("rack"):
+                rack_candidates[tokens["rack"]] += 1
+                break
+
+    rack = _resolve(rack_candidates, "0000")
+
+    center = re.sub(r"[^A-Za-z0-9]", "", center or "000")
+    rack = re.sub(r"[^A-Za-z0-9]", "", rack or "0000")
+
+    if center.isdigit() and len(center) < 3:
+        center = center.zfill(3)
+    if rack.isdigit() and len(rack) < 4:
+        rack = rack.zfill(4)
+
+    return center, rack
+
+
+def build_hostname_plan(
+    metadata: Dict[str, Dict[str, Any]],
+    switch_number: Union[int, str],
+    *,
+    include_poe: bool,
+    include_ambar_t: bool,
+    include_uca: bool,
+    include_video: bool,
+) -> Dict[str, str]:
+    center, rack = _choose_hostname_prefix(metadata, switch_number)
+    base_prefix = f"{center}C9300G-{rack}"
+
+    plan: Dict[str, str] = {}
+    ambar_counter = 1
+
+    if include_poe:
+        plan["POE"] = f"{base_prefix}{ambar_counter:02d}A"
+        ambar_counter += 1
+
+    if include_ambar_t:
+        plan["AMBAR_T"] = f"{base_prefix}{ambar_counter:02d}A"
+        ambar_counter += 1
+
+    if include_uca:
+        plan["UCA"] = f"{base_prefix}02U"
+
+    if include_video:
+        plan["VIDEO"] = f"{base_prefix}03V"
+
+    return plan
 
 def _resolve_new_interface(builder: Union[Callable[[int], str], str], idx: int) -> str:
     if callable(builder):
@@ -837,6 +1122,92 @@ def _description_from_block(block: Optional[List[str]]) -> Optional[str]:
         if m:
             return m.group(1).strip()
     return None
+
+
+def _access_vlan_from_block(block: Optional[List[str]]) -> Optional[str]:
+    if not block:
+        return None
+    for ln in block:
+        m = re.match(r"^\s*switchport\s+access\s+vlan\s+(\d+)\s*$", ln, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _ips_from_block(block: Optional[List[str]]) -> List[str]:
+    if not block:
+        return []
+    ips: List[str] = []
+    for ln in block:
+        m = re.match(r"^\s*ip\s+address\s+(\S+)\s+\S+\s*$", ln, re.IGNORECASE)
+        if m:
+            ip = m.group(1)
+            if ip.lower() != "dhcp":
+                ips.append(ip)
+    return ips
+
+
+def _ip_map_from_iface_cfgs(
+    iface_cfg_map: Dict[str, List[str]],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    interface_ip_map: Dict[str, str] = {}
+    vlan_ip_map: Dict[str, str] = {}
+    for if_short, block in iface_cfg_map.items():
+        ips = _ips_from_block(block)
+        if not ips:
+            continue
+        short = to_short_ifname(if_short)
+        interface_ip_map[short] = ips[0]
+        if short.lower().startswith("vlan"):
+            vlan_ip_map[short] = ips[0]
+    return interface_ip_map, vlan_ip_map
+
+
+def _collect_interface_ips(
+    iface_cfg_map: Dict[str, List[str]],
+    brief_map: Dict[str, str],
+) -> Dict[str, Set[str]]:
+    result: Dict[str, Set[str]] = {}
+    for ifname, ip in brief_map.items():
+        if not ip:
+            continue
+        result.setdefault(to_short_ifname(ifname), set()).add(ip)
+    for ifname, block in iface_cfg_map.items():
+        ips = _ips_from_block(block)
+        if not ips:
+            continue
+        short = to_short_ifname(ifname)
+        result.setdefault(short, set()).update(ips)
+    return result
+
+
+def _collect_vlan_ips(
+    iface_cfg_map: Dict[str, List[str]],
+    brief_map: Dict[str, str],
+) -> Dict[str, str]:
+    vlan_ips: Dict[str, str] = {}
+    for vlan_name, ip in brief_map.items():
+        if vlan_name.lower().startswith("vlan") and ip:
+            vlan_ips[to_short_ifname(vlan_name)] = ip
+    for ifname, block in iface_cfg_map.items():
+        short = to_short_ifname(ifname)
+        if not short.lower().startswith("vlan"):
+            continue
+        ips = _ips_from_block(block)
+        if not ips:
+            continue
+        vlan_ips[short] = ips[0]
+    return vlan_ips
+
+
+def _ip_suffix(ip_value: str) -> Optional[Tuple[int, int]]:
+    try:
+        parts = [int(part) for part in ip_value.split(".")]
+    except (AttributeError, ValueError):
+        return None
+    if len(parts) != 4:
+        return None
+    return (parts[2], parts[3])
 
 
 def _expand_vlan_token(token: str) -> List[str]:
@@ -982,40 +1353,65 @@ def parse_global_metadata(lines: List[str], iface_cfg_map: Dict[str, List[str]])
         "ntp_source": None,
         "ip_name_server_lines": [],
         "router_blocks": [],
+        "vlan_blocks": [],
     }
 
     in_interface = False
     router_buffer: Optional[List[str]] = None
+    current_vlan_block: Optional[List[str]] = None
+
+    def flush_router_buffer() -> None:
+        nonlocal router_buffer
+        if router_buffer is not None:
+            metadata["router_blocks"].append(router_buffer)
+            router_buffer = None
+
+    def flush_vlan_block() -> None:
+        nonlocal current_vlan_block
+        if current_vlan_block is not None:
+            metadata["vlan_blocks"].append(current_vlan_block)
+            current_vlan_block = None
 
     for raw in lines:
         stripped = raw.rstrip("\n")
         line = stripped.strip()
         lower = line.lower()
 
+        if current_vlan_block is not None:
+            if line == "!":
+                current_vlan_block.append("!")
+                flush_vlan_block()
+                continue
+            if stripped.startswith(" "):
+                current_vlan_block.append(stripped)
+                continue
+            flush_vlan_block()
+
         if not line:
             continue
 
         if lower.startswith("interface "):
             in_interface = True
-            if router_buffer is not None:
-                metadata["router_blocks"].append(router_buffer)
-                router_buffer = None
+            flush_router_buffer()
             continue
 
         if line == "!":
             if in_interface:
                 in_interface = False
-            if router_buffer is not None:
-                metadata["router_blocks"].append(router_buffer)
-                router_buffer = None
+            flush_router_buffer()
             continue
 
         if in_interface:
             continue
 
+        if re.match(r"^vlan\s+[\d,\-]+", lower):
+            flush_router_buffer()
+            flush_vlan_block()
+            current_vlan_block = [stripped]
+            continue
+
         if lower.startswith("router "):
-            if router_buffer is not None:
-                metadata["router_blocks"].append(router_buffer)
+            flush_router_buffer()
             router_buffer = [stripped]
             continue
 
@@ -1071,8 +1467,8 @@ def parse_global_metadata(lines: List[str], iface_cfg_map: Dict[str, List[str]])
             metadata["ip_name_server_lines"].append(stripped)
             continue
 
-    if router_buffer is not None:
-        metadata["router_blocks"].append(router_buffer)
+    flush_router_buffer()
+    flush_vlan_block()
 
     management_candidate = (
         metadata.get("ip_tftp_source_interface")
@@ -1081,6 +1477,9 @@ def parse_global_metadata(lines: List[str], iface_cfg_map: Dict[str, List[str]])
         or metadata.get("ntp_source")
     )
     metadata["management_interface"] = _guess_management_interface(iface_cfg_map, management_candidate)
+    metadata["video_management_interface"] = _guess_video_management_vlan(
+        iface_cfg_map, metadata["management_interface"]
+    )
 
     return metadata
 
@@ -1105,6 +1504,33 @@ def _guess_management_interface(
         return "Loopback0"
 
     return preferred
+
+
+def _guess_video_management_vlan(
+    iface_cfg_map: Dict[str, List[str]],
+    preferred: Optional[str],
+) -> Optional[str]:
+    if preferred:
+        short_pref = to_short_ifname(preferred)
+        if short_pref.lower().startswith("vlan9"):
+            return short_pref
+
+    candidates: List[str] = []
+    for ifname, block in iface_cfg_map.items():
+        short = to_short_ifname(ifname)
+        if not short.lower().startswith("vlan9"):
+            continue
+        if any(re.search(r"\bip address\b", ln, re.IGNORECASE) for ln in block):
+            candidates.append(short)
+
+    if candidates:
+        def _vlan_sort_key(name: str) -> Tuple[int, str]:
+            m = re.search(r"(\d+)", name)
+            return (int(m.group(1)) if m else 0, name)
+
+        return min(candidates, key=_vlan_sort_key)
+
+    return None
 
 
 def parse_video_interface_order(lines: List[str]) -> List[str]:
@@ -1139,6 +1565,27 @@ def parse_video_interface_order(lines: List[str]) -> List[str]:
             order.append(ifname)
     return order
 
+
+def parse_ip_interface_brief(lines: List[str]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Devuelve (interface_ip_map, vlan_ip_map) desde 'show ip interface brief'."""
+    interface_ip_map: Dict[str, str] = {}
+    vlan_ip_map: Dict[str, str] = {}
+    normalized = [_strip_timestamp_prefix(ln.rstrip("\n")) for ln in lines]
+
+    for ln in normalized:
+        m = IP_INT_BRIEF_ROW_RE.search(ln)
+        if not m:
+            continue
+        ifname = to_short_ifname(m.group("ifname"))
+        ip = m.group("ip")
+        if not ip or ip.lower() == "unassigned":
+            continue
+        interface_ip_map[ifname] = ip
+        if ifname.lower().startswith("vlan"):
+            vlan_ip_map[ifname] = ip
+
+    return interface_ip_map, vlan_ip_map
+
 # ---------- Parser de logs ----------
 
 def parse_log(filepath: str):
@@ -1158,6 +1605,12 @@ def parse_log(filepath: str):
         if m:
             hostname = m.group(1).strip()
             break
+    if not hostname:
+        for line in lines:
+            m = HOSTNAME_CAPTURE_RE.search(line)
+            if m:
+                hostname = m.group(1).strip()
+                break
     if not hostname:
         hostname = os.path.basename(filepath)
 
@@ -1205,6 +1658,8 @@ def parse_log(filepath: str):
     last_io_map   = parse_last_io_information(lines)
     metadata      = parse_global_metadata(lines, iface_cfg_map)
 
+    metadata["hostname"] = metadata.get("hostname") or hostname
+
     return hostname, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map, metadata
 
 # ---------- Inventarios ----------
@@ -1218,9 +1673,14 @@ def build_inventory_from_logs(filepaths: List[str]):
     wifi_items, voip_items, uca_items, ambar_other_items, trunk_items = [], [], [], [], []
     all_iface_cfgs: Dict[Tuple[str, str], List[str]] = {}
     host_metadata: Dict[str, Dict[str, Any]] = {}
+    skipped_ports: List[Dict[str, Any]] = []
 
     for fp in filepaths:
         host, int_rows, mac_map, voice_map, iface_cfg_map, last_io_map, metadata = parse_log(fp)
+
+        canonical_host = metadata.get("hostname") or host
+        metadata["hostname"] = canonical_host
+        host = canonical_host
 
         host_metadata[host] = metadata
 
@@ -1232,9 +1692,9 @@ def build_inventory_from_logs(filepaths: List[str]):
             if_short: _description_from_block(block)
             for if_short, block in iface_cfg_map.items()
         }
-
         for r in int_rows:
-            status = r["status"].lower()
+            status_display = r["status"]
+            status = status_display.lower()
             port_short = r["port"]
             last_info = last_io_map.get(port_short)
             block = iface_cfg_map.get(port_short)
@@ -1247,8 +1707,27 @@ def build_inventory_from_logs(filepaths: List[str]):
                     return False
                 return last_seconds is not None and last_seconds < INACTIVITY_THRESHOLD_SECONDS
 
+            def _register_skip(reason_code: str) -> None:
+                last_raw = last_info[0] if last_info else None
+                output_raw = last_info[1] if last_info else None
+                last_seconds = last_info[2] if last_info else None
+                skipped_ports.append(
+                    {
+                        "host": host,
+                        "hostname": metadata.get("hostname") or host,
+                        "port": port_short,
+                        "status": status_display,
+                        "reason": reason_code,
+                        "last_raw": last_raw,
+                        "output_raw": output_raw,
+                        "last_seconds": last_seconds,
+                        "name": r.get("name"),
+                    }
+                )
+
             if status != "connected":
                 if not (status == "notconnect" and _has_recent_activity(last_info)):
+                    _register_skip("status_not_connected")
                     continue
 
             vlan = r["vlan"].strip()
@@ -1266,8 +1745,14 @@ def build_inventory_from_logs(filepaths: List[str]):
                     and last_raw.strip().lower() == "never"
                     and output_raw.strip().lower() == "never"
                 ):
+                    _register_skip("never")
                     continue
-                if last_seconds is not None and last_seconds >= INACTIVITY_THRESHOLD_SECONDS:
+                if (
+                    last_seconds is not None
+                    and last_seconds >= INACTIVITY_THRESHOLD_SECONDS
+                    and status != "connected"
+                ):
+                    _register_skip("inactive_threshold")
                     continue
 
             description = description_map.get(port_short)
@@ -1341,7 +1826,22 @@ def build_inventory_from_logs(filepaths: List[str]):
     uca_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     ambar_other_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
     trunk_items.sort(key=lambda x: (x["src_host"], port_key(x["src_port"])))
-    return wifi_items, voip_items, uca_items, ambar_other_items, trunk_items, all_iface_cfgs, host_metadata
+    skipped_ports.sort(
+        key=lambda x: (
+            (x.get("hostname") or x.get("host") or ""),
+            port_key(x.get("port") or ""),
+        )
+    )
+    return (
+        wifi_items,
+        voip_items,
+        uca_items,
+        ambar_other_items,
+        trunk_items,
+        all_iface_cfgs,
+        host_metadata,
+        skipped_ports,
+    )
 
 
 # ---------- Mapeos ----------
@@ -1444,15 +1944,18 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     reserve_after_voip = RESERVED_AFTER_VOIP if has_voip else 0
     tail_free = RESERVED_TAIL_FREE if (has_wifi or has_voip) else 0
 
-    base_slots = (
-        len(wifi_items)
-        + reserve_after_wifi
-        + len(voip_items)
-        + reserve_after_voip
-        + len(trunk_items)
-        + tail_free
-    )
-    required_slots = base_slots
+    def _current_core_slots() -> int:
+        return (
+            len(wifi_items)
+            + reserve_after_wifi
+            + len(voip_items)
+            + reserve_after_voip
+            + len(trunk_items)
+            + tail_free
+        )
+
+    core_slots = _current_core_slots()
+    required_slots = core_slots
     if required_slots == 0 and ambar_others:
         max_stack_capacity = POE_MAX_PORTS * POE_MAX_STACK_MEMBERS
         required_slots = min(len(ambar_others), max_stack_capacity)
@@ -1462,15 +1965,18 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         POE_MEMBER_METADATA.clear()
         return [], ambar_others
 
-    base_fixed = (
-        len(wifi_items)
-        + reserve_after_wifi
-        + len(voip_items)
-        + reserve_after_voip
-        + tail_free
-        + len(trunk_items)
-        + len(ambar_others)  # importante: contamos TODO ambar (incluye speed10)
-    )
+    avoid_requires_poe = False
+    if has_wifi:
+        for collection in (wifi_items, voip_items, ambar_others, trunk_items):
+            if any(item.get("avoid_uxm") for item in collection):
+                avoid_requires_poe = True
+                break
+
+    if avoid_requires_poe and len(capacities) == 1:
+        # Fuerza que el primer miembro "no wifi" sea de 48 puertos para que los
+        # elementos marcados con avoid_uxm compartan chasis con el resto de AMBAR
+        # y no disparen la creación de un segundo chasis adicional de 24T.
+        capacities.append(POE_MAX_PORTS)
 
     def _build_meta(caps: List[int]) -> Tuple[List[Dict[str, Any]], int]:
         meta: List[Dict[str, Any]] = []
@@ -1484,13 +1990,32 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
 
     meta_info, total_usable = _build_meta(capacities)
 
+    preferred_member_limit = min(POE_MAX_STACK_MEMBERS, 2)
+
     while len(capacities) < POE_MAX_STACK_MEMBERS:
-        usable_for_ambar = max(total_usable - (base_fixed - len(ambar_others)), 0)
+        core_slots = _current_core_slots()
+        usable_for_ambar = max(total_usable - core_slots, 0)
         if usable_for_ambar >= len(ambar_others):
             break
         remaining_needed = len(ambar_others) - usable_for_ambar
         if remaining_needed <= 0:
             break
+
+        if len(capacities) >= preferred_member_limit:
+            reclaimed = 0
+            if tail_free > 0 and remaining_needed > 0:
+                reclaim = min(remaining_needed, tail_free)
+                if reclaim:
+                    tail_free -= reclaim
+                    remaining_needed -= reclaim
+                    reclaimed += reclaim
+            # Mantén siempre las reservas tras WIFI/VOIP: garantizan los puertos
+            # libres que el usuario necesita inmediatamente después de esos
+            # servicios críticos. Solo se puede reclamar tail_free para intentar
+            # ajustar la pila; si no basta, se añadirá un nuevo miembro.
+            if reclaimed > 0:
+                continue
+
         next_capacity = (
             POE_MAX_PORTS
             if (len(capacities) + 1) < POE_MAX_STACK_MEMBERS or remaining_needed > POE_AUX_FINAL_PORTS
@@ -1520,8 +2045,26 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
         }
 
     total_usable = sum(info["usable_capacity"] for info in POE_MEMBER_METADATA.values())
-    if base_fixed > total_usable:
-        raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP/AMBAR/TRUNK configurados")
+
+    core_slots = _current_core_slots()
+
+    if core_slots > total_usable:
+        deficit = core_slots - total_usable
+        if tail_free > 0:
+            reclaim = min(deficit, tail_free)
+            tail_free -= reclaim
+            deficit -= reclaim
+        if deficit > 0 and reserve_after_voip > 0:
+            reclaim = min(deficit, reserve_after_voip)
+            reserve_after_voip -= reclaim
+            deficit -= reclaim
+        if deficit > 0 and reserve_after_wifi > 0:
+            reclaim = min(deficit, reserve_after_wifi)
+            reserve_after_wifi -= reclaim
+            deficit -= reclaim
+        core_slots = _current_core_slots()
+        if deficit > 0 or core_slots > total_usable:
+            raise RuntimeError("Capacidad POE insuficiente para WIFI/VoIP/AMBAR/TRUNK configurados")
 
     # Particiones y orden
     wifi_primary = [it for it in wifi_items if not it.get("avoid_uxm")]
@@ -1530,16 +2073,25 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     voip_avoid   = [it for it in voip_items if it.get("avoid_uxm")]
 
     # AMBAR que caben en POE
-    usable_for_ambar = max(total_usable - (
-        len(wifi_primary) + reserve_after_wifi + len(voip_primary) + reserve_after_voip + tail_free + len(trunk_items)
-    ), 0)
-    ambar_for_poe = ambar_others[:usable_for_ambar]
-    ambar_overflow = ambar_others[usable_for_ambar:]
+    core_slots = _current_core_slots()
+    ambar_capacity = max(total_usable - core_slots, 0)
+    ambar_for_poe = ambar_others[:ambar_capacity]
+    ambar_overflow = ambar_others[ambar_capacity:]
 
     ambar_primary: List[Dict[str, Any]] = []
     ambar_slow:    List[Dict[str, Any]] = []  # <-- speed 10
     for it in ambar_for_poe:
         (ambar_slow if it.get("avoid_uxm") else ambar_primary).append(it)
+
+    def _split_by_poe_requirement(items: List[Dict[str, Any]]):
+        poe_required: List[Dict[str, Any]] = []
+        optional: List[Dict[str, Any]] = []
+        for entry in items:
+            (poe_required if _item_requires_poe_support(entry) else optional).append(entry)
+        return poe_required, optional
+
+    ambar_primary_poe, ambar_primary_optional = _split_by_poe_requirement(ambar_primary)
+    ambar_slow_poe, ambar_slow_optional = _split_by_poe_requirement(ambar_slow)
 
     trunk_primary = [it for it in trunk_items if not it.get("avoid_uxm")]
     trunk_avoid   = [it for it in trunk_items if it.get("avoid_uxm")]
@@ -1556,8 +2108,10 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_wifi))
     sequence.extend(("ITEM", it) for it in voip_primary)
     sequence.extend(("LIBRE", None) for _ in range(reserve_after_voip))
-    sequence.extend(("ITEM", it) for it in ambar_primary)
-    sequence.extend(("AMBAR_SLOW", it) for it in ambar_slow)   # <-- aquí: antes de TRUNK
+    sequence.extend(("ITEM", it) for it in ambar_primary_poe)
+    sequence.extend(("ITEM", it) for it in ambar_primary_optional)
+    sequence.extend(("AMBAR_SLOW", it) for it in ambar_slow_poe)   # <-- aquí: antes de TRUNK
+    sequence.extend(("AMBAR_SLOW", it) for it in ambar_slow_optional)
     sequence.extend(("ITEM", it) for it in trunk_primary)
     if avoid_sequence:
         sequence.append(("FORCE_NEXT", None))
@@ -1622,6 +2176,55 @@ def make_mapping_poe(wifi_items, voip_items, ambar_others, trunk_items):
     while member_index < len(capacities):
         goto_next_member()
         flush_current(1)
+
+    # Actualiza el tipo de cada miembro en base a los orígenes asignados.
+    member_roles: Dict[int, str] = {}
+    for idx_meta, meta in POE_MEMBER_METADATA.items():
+        if idx_meta <= 1:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        member_roles[idx_meta] = "data"
+
+    for row in rows:
+        if not row or row[-1] != "POE":
+            continue
+        if str(row[0]).upper() == "LIBRE":
+            continue
+        member_idx = _extract_member_index(row[3])
+        if member_idx is None or member_idx <= 1:
+            continue
+        if member_idx not in member_roles:
+            continue
+        tags_field = row[8]
+        origin = None
+        if isinstance(tags_field, str) and tags_field and tags_field.upper() != "N/A":
+            for part in tags_field.split(";"):
+                if not part:
+                    continue
+                key_val = part.split("=", 1)
+                if len(key_val) != 2:
+                    continue
+                key = key_val[0].strip().upper()
+                if key == "ORIGIN":
+                    origin = key_val[1].strip().upper()
+                    break
+        if isinstance(row[6], str):
+            vlan_value = row[6].strip()
+            if vlan_value in MANDATORY_POE_VLANS:
+                member_roles[member_idx] = "poe"
+                continue
+
+        if origin in {"WIFI", "VOIP"}:
+            member_roles[member_idx] = "poe"
+
+    for idx_meta, role in member_roles.items():
+        meta = POE_MEMBER_METADATA.get(idx_meta)
+        if not isinstance(meta, dict):
+            continue
+        meta["type"] = role
+
+    _relocate_poe_trunks(rows)
 
     return rows, ambar_overflow
 
@@ -1729,35 +2332,43 @@ def make_mapping_uca(uca_items, reserved_tail: int):
     return rows
 
 
-def _apply_uca_management_trunks(uca_rows: List[List[str]], *, include_mgmt_vlan: bool) -> None:
-    if not include_mgmt_vlan:
-        return
-
+def _collect_trunk_allowed_from_rows(rows: List[List[str]], group: str) -> Tuple[List[Tuple[int, List[str]]], List[str]]:
     entries: List[Tuple[int, List[str]]] = []
     allowed: Set[str] = set()
 
-    for idx, row in enumerate(uca_rows):
-        if row[-1] != "UCA":
+    for idx, row in enumerate(rows):
+        if row[-1] != group:
             continue
         entries.append((idx, row))
-        if row[0] == "LIBRE":
+        if str(row[0]).upper() == "LIBRE":
             continue
         vlan = row[6]
-        if vlan and vlan.isdigit():
-            allowed.add(vlan)
+        if vlan and str(vlan).isdigit():
+            allowed.add(str(vlan))
         allowed.update(_vlans_from_tag_string(row[8]))
 
-    if not entries:
-        return
-
-    allowed.add("623")
     try:
-        allowed_list = sorted(allowed, key=int)
+        ordered = sorted(allowed, key=int)
     except ValueError:
-        allowed_list = sorted(allowed)
+        ordered = sorted(allowed)
 
-    if not allowed_list:
-        allowed_list = ["623"]
+    return entries, ordered
+
+
+def _apply_uca_management_trunks(uca_rows: List[List[str]], *, include_mgmt_vlan: bool) -> Optional[List[str]]:
+    if not include_mgmt_vlan:
+        return None
+
+    entries, allowed_list = _collect_trunk_allowed_from_rows(uca_rows, "UCA")
+    if not entries:
+        return None
+
+    if "623" not in allowed_list:
+        allowed_list.append("623")
+    try:
+        allowed_list = sorted(allowed_list, key=int)
+    except ValueError:
+        allowed_list = sorted(allowed_list)
 
     pos, last_row = max(
         entries,
@@ -1781,6 +2392,150 @@ def _apply_uca_management_trunks(uca_rows: List[List[str]], *, include_mgmt_vlan
         "UCA",
     ]
 
+    return allowed_list
+
+
+def _ensure_poe_downlink_trunk(
+    poe_rows: List[List[str]],
+    allowed_vlans: Optional[List[str]],
+) -> None:
+    if not allowed_vlans:
+        return
+
+    try:
+        ordered = sorted({str(v) for v in allowed_vlans}, key=int)
+    except ValueError:
+        ordered = sorted({str(v) for v in allowed_vlans})
+
+    allowed_str = ",".join(ordered)
+    tag_str = f"VLANS={allowed_str};ORIGIN=TRUNK"
+
+    last_trunk_idx: Optional[int] = None
+    last_trunk_sw: Optional[str] = None
+    last_trunk_port: Optional[int] = None
+
+    for idx, row in enumerate(poe_rows):
+        if row[-1] != "POE":
+            continue
+        if str(row[0]).upper() != "TRUNK":
+            continue
+        last_trunk_idx = idx
+        last_trunk_sw = row[5]
+        last_trunk_port = _extract_if_index(row[3])
+
+    candidate_idx: Optional[int] = None
+    if last_trunk_idx is not None and last_trunk_sw is not None:
+        best_port: Optional[int] = None
+        best_idx: Optional[int] = None
+        for idx, row in enumerate(poe_rows):
+            if row[-1] != "POE":
+                continue
+            if str(row[0]).upper() != "LIBRE":
+                continue
+            if row[5] != last_trunk_sw:
+                continue
+            port = _extract_if_index(row[3])
+            if port is None:
+                continue
+            if last_trunk_port is not None and port <= last_trunk_port:
+                continue
+            if best_port is None or port < best_port or (port == best_port and (best_idx is None or idx < best_idx)):
+                best_port = port
+                best_idx = idx
+        if best_idx is not None:
+            candidate_idx = best_idx
+
+    if candidate_idx is None:
+        for idx in range(len(poe_rows) - 1, -1, -1):
+            row = poe_rows[idx]
+            if row[-1] != "POE":
+                continue
+            if str(row[0]).upper() != "LIBRE":
+                continue
+            candidate_idx = idx
+            break
+
+    if candidate_idx is None:
+        return
+
+    iface_new = poe_rows[candidate_idx][3]
+    sw_name = poe_rows[candidate_idx][5]
+    poe_rows[candidate_idx] = [
+        "TRUNK",
+        "TRUNK",
+        "TRUNK UCA",
+        iface_new,
+        "TRUNK UCA",
+        sw_name,
+        "trunk",
+        "trunk",
+        tag_str,
+        "N/A",
+        "POE",
+    ]
+
+
+def _relocate_poe_trunks(rows: List[List[str]]) -> None:
+    """Move trunk entries to the last POE member so they end up at the tail ports."""
+
+    trunk_rows: List[Tuple[List[str], int, int, int]] = []
+    last_member: Optional[int] = None
+
+    for idx, row in enumerate(rows):
+        if not row or row[-1] != "POE":
+            continue
+        ifname = row[3] if len(row) > 3 else None
+        member_idx = _extract_member_index(ifname) if isinstance(ifname, str) else None
+        port_idx = _extract_if_index(ifname) if isinstance(ifname, str) else None
+        if member_idx is not None and (last_member is None or member_idx > last_member):
+            last_member = member_idx
+        origin = _origin_from_tag_string(row[8]) if len(row) > 8 else None
+        row_label = row[0] if row else ""
+        is_trunk = False
+        if isinstance(row_label, str) and row_label.upper() == "TRUNK":
+            is_trunk = True
+        elif origin == "TRUNK":
+            is_trunk = True
+        if is_trunk and member_idx is not None and port_idx is not None:
+            trunk_rows.append((list(row), idx, member_idx, port_idx))
+
+    if not trunk_rows or last_member is None:
+        return
+
+    candidate_slots: List[Tuple[int, int]] = []
+    for idx, row in enumerate(rows):
+        if not row or row[-1] != "POE":
+            continue
+        ifname = row[3] if len(row) > 3 else None
+        member_idx = _extract_member_index(ifname) if isinstance(ifname, str) else None
+        if member_idx != last_member:
+            continue
+        row_label = row[0] if row else ""
+        if not (isinstance(row_label, str) and row_label.upper() == "LIBRE"):
+            continue
+        port_idx = _extract_if_index(ifname) if isinstance(ifname, str) else None
+        if port_idx is None:
+            continue
+        candidate_slots.append((port_idx, idx))
+
+    if len(candidate_slots) < len(trunk_rows):
+        return
+
+    candidate_slots.sort(reverse=True)
+
+    for row_copy, original_idx, member_idx, port_idx in trunk_rows:
+        formatter = _poe_interface_formatter(member_idx)
+        sw_name = row_copy[5]
+        rows[original_idx] = _libre_row(formatter, port_idx, sw_name, "POE")
+
+    last_formatter = _poe_interface_formatter(last_member)
+    last_sw_name = _poe_switch_name_for_member(last_member)
+
+    for (row_copy, _, _, _), (port_idx, slot_idx) in zip(trunk_rows, candidate_slots):
+        row_copy[3] = _resolve_new_interface(last_formatter, port_idx)
+        row_copy[5] = last_sw_name
+        rows[slot_idx] = row_copy
+
 
 def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tuple[str, str], List[str]], Dict[str, Dict[str, Any]]]:
     rows: List[List[str]] = []
@@ -1788,7 +2543,11 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
     metadata_map: Dict[str, Dict[str, Any]] = {}
 
     for fp in video_logs:
-        host, int_rows, _mac_map, _voice_map, iface_cfg_map, _last_io_map, metadata = parse_log(fp)
+        host, int_rows, mac_map, _voice_map, iface_cfg_map, _last_io_map, metadata = parse_log(fp)
+
+        canonical_host = metadata.get("hostname") or host
+        metadata["hostname"] = canonical_host
+        host = canonical_host
 
         metadata_map[host] = metadata
 
@@ -1799,14 +2558,21 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
             if_short: _description_from_block(block)
             for if_short, block in iface_cfg_map.items()
         }
+        access_vlan_map = {
+            if_short: _access_vlan_from_block(block)
+            for if_short, block in iface_cfg_map.items()
+        }
 
         with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
             lines = fh.readlines()
         order = parse_video_interface_order(lines)
+        interface_ip_map, vlan_ip_map = parse_ip_interface_brief(lines)
+        ip_to_vlan = {ip: vlan for vlan, ip in vlan_ip_map.items() if ip}
         if not order:
             order = sorted(iface_cfg_map.keys(), key=_stack_interface_sort_key)
 
         sw_name = NEW_SWITCH_VIDEO_NAME
+        new_idx = 1
         for if_src in order:
             desc = description_map.get(if_src)
             if desc is None:
@@ -1820,7 +2586,17 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
                 )
             if not desc:
                 desc = "N/A"
-            new_if = if_src  # se conserva el nombre original
+            vlan_key = None
+            ip_addr = interface_ip_map.get(if_src)
+            if ip_addr:
+                vlan_key = ip_to_vlan.get(ip_addr)
+            if not vlan_key:
+                access_vlan = access_vlan_map.get(if_src)
+                vlan_key = f"Vlan{access_vlan}" if access_vlan else None
+            macs = mac_map.get(if_src) or (mac_map.get(vlan_key) if vlan_key else []) or []
+            mac_value = ";".join(macs) if macs else "N/A"
+            new_if = _resolve_new_interface(NEW_IF_VIDEO_PREFIX, new_idx)
+            new_idx += 1
             rows.append([
                 host,
                 if_src,
@@ -1831,7 +2607,7 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
                 "ROUTED",
                 "l3",
                 "N/A",
-                "N/A",
+                mac_value,
                 "VIDEO",
             ])
 
@@ -1862,9 +2638,16 @@ def _sort_group_rows(rows: List[List[str]]) -> None:
 
 # ---------- Excel ----------
 
-def export_excel(all_rows, out_dir):
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    xlsx = os.path.join(out_dir, f"mapeo_wifi_voip_ambar_uca_{ts}.xlsx")
+def export_excel(
+    all_rows,
+    out_dir,
+    switch_number: Union[str, int],
+    skipped_ports: Optional[List[Dict[str, Any]]] = None,
+):
+    switch_suffix = str(switch_number).strip()
+    if not switch_suffix:
+        switch_suffix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    xlsx = os.path.join(out_dir, f"{switch_suffix}_Excel.xlsx")
 
     cols = [
         "SW Actual","Interface actual","Description actual","Interface nuevo",
@@ -1882,7 +2665,7 @@ def export_excel(all_rows, out_dir):
     with pd.ExcelWriter(xlsx, engine="xlsxwriter") as w:
         wb = w.book
         fmt_header = wb.add_format({'bold': True})
-        fmt_libre  = wb.add_format({'bg_color': '#FFF59D'})
+        fmt_libre  = wb.add_format({'bg_color': '#C8E6C9'})
         fmt_trunk  = wb.add_format({'bg_color': '#FFE0B2'})
         # Formatos para override por VLAN
         fmt_red = wb.add_format({'bg_color': '#FFCDD2'})  # rojo claro
@@ -1901,34 +2684,20 @@ def export_excel(all_rows, out_dir):
 
             display_map: Dict[str, str] = {}
             if group_tag == "POE":
+                meta_by_name = {
+                    str(info.get("sw_name")): info for info in POE_MEMBER_METADATA.values()
+                }
                 for sw_name, grp in subset.groupby("SW Nuevo"):
                     if grp.empty:
                         continue
-                    first_if = grp["Interface nuevo"].iloc[0]
-                    member_idx = _extract_member_index(first_if) if isinstance(first_if, str) else None
-                    meta = POE_MEMBER_METADATA.get(member_idx, {}) if member_idx else {}
-                    capacity = meta.get("capacity") if meta else None
-                    if not capacity:
-                        try:
-                            max_port = grp["Interface nuevo"].map(_extract_if_index).max()
-                        except Exception:
-                            max_port = None
-                        capacity = 24 if max_port and max_port <= 24 else 48
-                    label_size = 24 if capacity and capacity <= 24 else 48
-                    origins = {
-                        origin
-                        for origin in (
-                            _origin_from_tag_string(value)
-                            for value in grp["Tags"].tolist()
-                        )
-                        if origin
-                    }
-                    if meta.get("type") == "wifi":
-                        display_map[sw_name] = f"C9300-{label_size}P-UXM"
-                    elif ("AMBAR" in origins) and not (origins & {"WIFI", "VOIP"}):
-                        display_map[sw_name] = f"C9300-{label_size}T"
-                    else:
-                        display_map[sw_name] = f"C9300-{label_size}P"
+                    interfaces = grp["Interface nuevo"].tolist()
+                    tags = grp["Tags"].tolist()
+                    display_map[sw_name] = _poe_display_label(
+                        sw_name,
+                        interfaces=interfaces,
+                        tags=tags,
+                        meta_by_name=meta_by_name,
+                    )
             elif group_tag == "AMBAR_T":
                 for sw_name, grp in subset.groupby("SW Nuevo"):
                     if grp.empty:
@@ -1949,6 +2718,12 @@ def export_excel(all_rows, out_dir):
                         max_port = None
                     label_size = 24 if max_port and max_port <= 24 else 48
                     display_map[sw_name] = f"C9300-{label_size}T"
+            elif group_tag == "VIDEO":
+                for sw_name, grp in subset.groupby("SW Nuevo"):
+                    if grp.empty:
+                        continue
+                    interfaces = grp["Interface nuevo"].tolist()
+                    display_map[sw_name] = _video_display_label(interfaces)
 
             if display_map:
                 sheet_df["SW Nuevo"] = sheet_df["SW Nuevo"].map(lambda v: display_map.get(v, v))
@@ -2002,8 +2777,66 @@ def export_excel(all_rows, out_dir):
             col_index = sheet_df.columns.get_loc("_Grupo")
             ws.set_column(col_index, col_index, None, None, {'hidden': True})
 
+        if skipped_ports:
+            reason_text_map = {
+                "status_not_connected": "Estado distinto de 'connected' sin actividad reciente.",
+                "never": "La interfaz reporta 'Last input/Output never'.",
+                "inactive_threshold": (
+                    "Inactividad superior a aproximadamente "
+                    f"{INACTIVITY_THRESHOLD_SECONDS // 86400} días."
+                ),
+            }
+
+            removed_records = []
+            for entry in skipped_ports:
+                hostname = entry.get("hostname") or entry.get("host") or "N/A"
+                port = entry.get("port") or "N/A"
+                alias = entry.get("name") or ""
+                status = entry.get("status") or "N/A"
+                last_raw = entry.get("last_raw") or "N/D"
+                output_raw = entry.get("output_raw") or "N/D"
+                last_seconds = entry.get("last_seconds")
+                reason_code = entry.get("reason") or ""
+                reason_text = reason_text_map.get(reason_code, reason_code)
+                days = ""
+                if isinstance(last_seconds, (int, float)) and last_seconds:
+                    days = f"{last_seconds / 86400:.1f}"
+
+                removed_records.append(
+                    {
+                        "Hostname": hostname,
+                        "Puerto": port,
+                        "Alias": alias,
+                        "Estado": status,
+                        "Last input": last_raw,
+                        "Output": output_raw,
+                        "Inactividad (días)": days,
+                        "Motivo": reason_text,
+                    }
+                )
+
+            removed_df = pd.DataFrame(
+                removed_records,
+                columns=[
+                    "Hostname",
+                    "Puerto",
+                    "Alias",
+                    "Estado",
+                    "Last input",
+                    "Output",
+                    "Inactividad (días)",
+                    "Motivo",
+                ],
+            )
+            removed_df.sort_values(by=["Hostname", "Puerto"], inplace=True)
+            removed_df.to_excel(w, sheet_name="Puertos Eliminados", index=False)
+            ws_removed = w.sheets["Puertos Eliminados"]
+            ws_removed.set_row(0, None, fmt_header)
+            ws_removed.set_column("A:H", None, wb.add_format({'num_format': '@'}))
+
 
     return xlsx
+
 
 # ---------- Plantillas base + export de configs ----------
 
@@ -2044,6 +2877,102 @@ VIDEO_ACL_LINES = [
     "access-list 10 permit 172.24.32.0 0.0.0.255",
     "access-list 10 permit 172.24.37.0 0.0.0.255",
     "access-list 10 permit 104.192.128.0 0.0.255.255",
+]
+
+VIDEO_BANNER_LINES = [
+    "banner exec ^C",
+    "Session established to $(hostname) on line $(line)",
+    "^C",
+    "banner incoming ^C",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! PROHIBIDO !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!                                                                            !!",
+    "!!           Queda totalmente prohibido el uso del protocolo TELNET           !!",
+    "!!                   Contacte con el administrador de la red                  !!",
+    "!!                                                                            !!",
+    "!!           The use of the TELNET protocol is completely prohibited          !!",
+    "!!                       Contact the network administrator                    !!",
+    "!!                                                                            !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! FORBIDDEN !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "^C",
+    "banner login ^C",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ATENCION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!                                                                            !!",
+    "!!                          Solo personal autorizado                          !!",
+    "!!                                                                            !!",
+    "!!                          Authorized personal only                          !!",
+    "!!                                                                            !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CAUTION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "^C",
+    "banner motd ^C",
+    "********************************************************************************",
+    "**                                                                            **",
+    "**                       AENA - Aeropuerto Barcelona                          **",
+    "**                                                                            **",
+    "**         Division de Tecnologias de la Informacion y Comunicaciones         **",
+    "**                                                                            **",
+    "**                  Esta accediendo a un sistema protegido                    **",
+    "**          Si no esta autorizado cierre inmediatamente su conexion           **",
+    "**                  La manipulacion no autorizada infringe                    **",
+    "**             la ley 21/2003, de 7 de Julio, de Seguridad Aerea              **",
+    "**                                                                            **",
+    "********************************************************************************",
+    "**                                                                            **",
+    "**                         This is a Private System                           **",
+    "**          If you are not authorized close your connection inmediatly        **",
+    "**                    Unauthorized access is regulated by                     **",
+    "**                   Air Security Law 21/2003, 7th of July                    **",
+    "**                                                                            **",
+    "********************************************************************************",
+    "|                          Informacion de Acceso",
+    "|                          Equipo: $(hostname)",
+    "|",
+    "|                       Autorizacion mediante TACACS+",
+    "|",
+    "^C",
+    "banner prompt-timeout ^C",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ADVERTENCIA !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!                                                                            !!",
+    "!!                      Ha experiado el tiempo de session                     !!",
+    "!!                                                                            !!",
+    "!!                        Has experienced session time                        !!",
+    "!!                                                                            !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "^C",
+    "banner config-save ^C",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMACION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!                                                                            !!",
+    "!!         Desea realizar una copia de la configuracion en ejecucion          !!",
+    "!!                                                                            !!",
+    "!!           You want to make a copy of the running configuration             !!",
+    "!!                                                                            !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMATION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "^C",
+    "!",
+    "line con 0",
+    " session-timeout 15",
+    " exec-timeout 15 0",
+    " authorization exec TAC-AUTO",
+    " accounting exec TAC-ACC",
+    " logging synchronous",
+    " login authentication TAC-AUTH",
+    " stopbits 1",
+    "line vty 0 4",
+    " session-timeout 15",
+    " exec-timeout 15 0",
+    " authorization exec TAC-AUTO",
+    " accounting exec TAC-ACC",
+    " logging synchronous",
+    " login authentication TAC-AUTH",
+    " transport preferred ssh",
+    "line vty 5 15",
+    " session-timeout 15",
+    " exec-timeout 15 0",
+    " authorization exec TAC-AUTO",
+    " accounting exec TAC-ACC",
+    " logging synchronous",
+    " login authentication TAC-AUTH",
+    " transport preferred ssh",
+    "!",
 ]
 
 def _read_template_file(path: str) -> List[str]:
@@ -2631,22 +3560,66 @@ def _uca_extra_base_lines() -> List[str]:
     return lines
 
 
-def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
+
+def _video_extra_base_lines(metadata: Dict[str, Any], *, level: str) -> List[str]:
     def _short(name: Optional[str]) -> Optional[str]:
         return to_short_ifname(name) if name else None
 
-    mgmt_if = _short(metadata.get("management_interface")) or "Loopback0"
+    def _format_source_interface(name: str) -> str:
+        if not name:
+            return name
+        lowered = name.lower()
+        if lowered.startswith("loopback"):
+            suffix = name[len("Loopback"):]
+            if suffix.isdigit():
+                return f"loopback {suffix}"
+        return name
+
+    level_key = str(level).strip()
+    if level_key not in {"2", "3"}:
+        level_key = "2"
+
+    mgmt_candidate = _short(metadata.get("management_interface"))
+    mgmt_vlan_candidate = _short(metadata.get("video_management_interface"))
+
+    def _pick_level2_mgmt() -> str:
+        for cand in (mgmt_candidate, mgmt_vlan_candidate):
+            if cand and cand.lower().startswith("vlan9"):
+                return cand
+        for cand in (mgmt_candidate, mgmt_vlan_candidate):
+            if cand and cand.lower().startswith("vlan"):
+                return cand
+        for cand in (mgmt_candidate, mgmt_vlan_candidate):
+            if cand:
+                return cand
+        return "Vlan9XX"
+
+    if level_key == "2":
+        mgmt_if = _pick_level2_mgmt()
+    else:
+        mgmt_if = mgmt_candidate or "Loopback0"
+
     default_gateway = metadata.get("ip_default_gateway")
+    if not default_gateway:
+        default_gateway = "104.129.XX.XX" if level_key == "2" else "10.192.133.254"
+
     register_if = _short(metadata.get("ip_pim_register_source")) or mgmt_if
-    rp_lines = metadata.get("ip_pim_rp_lines", [])
-    name_servers = metadata.get("ip_name_server_lines") or ["ip name-server 104.16.99.100"]
-    snmp_contact = metadata.get("snmp_contact") or DEFAULT_SNMP_CONTACT
+    rp_lines = [ln.strip() for ln in metadata.get("ip_pim_rp_lines", []) if ln.strip()]
+
+    name_servers_raw = metadata.get("ip_name_server_lines") or ["ip name-server 104.16.99.100"]
+    name_servers: List[str] = []
+    for ns in name_servers_raw:
+        ns_line = ns.strip()
+        if ns_line and ns_line not in name_servers:
+            name_servers.append(ns_line)
+
     tftp_if = _short(metadata.get("ip_tftp_source_interface")) or mgmt_if
     http_if = _short(metadata.get("ip_http_client_source_interface")) or mgmt_if
-    snmp_src_if = _short(metadata.get("snmp_source_interface")) or mgmt_if
+    snmp_src_if = _format_source_interface(_short(metadata.get("snmp_source_interface")) or mgmt_if)
     ntp_source_if = _short(metadata.get("ntp_source")) or mgmt_if
 
     lines: List[str] = [
+        "!",
         "service password-encryption",
         "!",
         "aaa new-model",
@@ -2667,17 +3640,19 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "aaa accounting commands 15 default start-stop group tacacs+",
         "aaa session-id common",
         "!",
-        "ip routing",
-        "ip multicast-routing",
-        "ip multicast multipath",
-        "!",
     ]
 
-    for ns in name_servers:
-        ns_line = ns.strip()
-        if ns_line:
-            lines.append(ns_line)
+    if level_key == "3":
+        lines.extend([
+            "ip routing",
+            "ip multicast-routing",
+            "ip multicast multipath",
+            "!",
+        ])
+    else:
+        lines.append("!")
 
+    lines.extend(name_servers)
     lines.extend([
         "no ip domain lookup",
         "ip domain name aena.es",
@@ -2687,12 +3662,10 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "lldp run",
         "!",
         f"ip tftp source-interface {tftp_if}",
-        f"ip http client source-interface {http_if}",
         "ip ssh time-out 60",
         "ip ssh authentication-retries 2",
         "ip ssh version 2",
         "ip scp server enable",
-        "ip tftp blocksize 512",
         "!",
         "archive",
         " log config",
@@ -2705,10 +3678,43 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "!",
         "username admin privilege 15 secret 0 7BCN@ena.2024,",
         "!",
+        "interface GigabitEthernet0/0",
+        " vrf forwarding Mgmt-vrf",
+        " ip address 6.6.6.6 255.255.255.252",
+        " negotiation auto",
+        "no shutdown",
+        "!",
+        "interface Loopback0",
     ])
 
-    if default_gateway:
-        lines.append(f"ip default-gateway {default_gateway}")
+    if level_key == "2":
+        lines.extend([
+            " ip address 10.192.132.x 255.255.255.255",
+            "shutdown",
+            "!",
+            f"interface {mgmt_if}",
+            " ip address 104.129.XX.YY 255.255.255.252",
+            " no ip route-cache",
+            "!",
+        ])
+    else:
+        lines.extend([
+            " ip address 10.192.132.11 255.255.255.255",
+            "!",
+        ])
+
+    lines.append(f"ip default-gateway {default_gateway}")
+
+    if level_key == "3":
+        if rp_lines:
+            lines.extend(rp_lines)
+        else:
+            lines.append("ip pim rp-address 104.241.254.254")
+
+    lines.append(f"ip pim register-source {register_if}")
+
+    if level_key == "2" and rp_lines:
+        lines.extend(rp_lines)
 
     lines.extend([
         "ip forward-protocol nd",
@@ -2716,16 +3722,14 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "ip http authentication aaa login-authentication TAC-AUTH",
         "ip http authentication aaa exec-authorization TAC-AUTO",
         "ip http secure-server",
-    ])
-
-    if register_if:
-        lines.append(f"ip pim register-source {register_if}")
-    for rp in rp_lines:
-        rp_line = rp.strip()
-        if rp_line:
-            lines.append(rp_line)
-
-    lines.extend([
+        f"ip http client source-interface {http_if}",
+        f"ip tftp source-interface {tftp_if}",
+        "ip tftp blocksize 512",
+        "ip ssh time-out 60",
+        "ip ssh authentication-retries 2",
+        "ip ssh version 2",
+        "ip scp server enable",
+        "!",
         "logging trap debugging",
         "logging host 4.9.0.135",
         "logging host 104.16.0.225",
@@ -2750,114 +3754,22 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
         "snmp-server community BCN2010rw RW",
         "snmp-server user V3Dcom V3groupDCOM v3 auth sha #2024@En@! priv des @En@,.2025!",
         "snmp-server enable traps",
-        "snmp-server host 104.16.0.225 version 2c GreBCNro",
-        "snmp-server host 104.16.0.225 version 3 priv V3gesred",
-        "snmp-server host 4.9.0.135 version 2c GreBCNro",
-        "snmp-server host 4.9.0.135 version 3 priv V3gesred",
-        "snmp-server host 104.18.220.10 version 2c GreBCNro",
-        "snmp-server host 104.18.220.10 version 3 priv V3gesred",
     ])
 
     if snmp_src_if:
         lines.append(f"snmp-server source-interface traps {snmp_src_if}")
 
     lines.extend([
-        f"snmp-server contact {snmp_contact}",
-        "!",
-        "banner exec ^C",
-        "Session established to $(hostname) on line $(line)",
-        "^C",
-        "banner incoming ^C",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! PROHIBIDO !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "!!                                                                            !!",
-        "!!           Queda totalmente prohibido el uso del protocolo TELNET           !!",
-        "!!                   Contacte con el administrador de la red                  !!",
-        "!!                                                                            !!",
-        "!!           The use of the TELNET protocol is completely prohibited          !!",
-        "!!                       Contact the network administrator                    !!",
-        "!!                                                                            !!",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! FORBIDDEN !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "^C",
-        "banner login ^C",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ATENCION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "!!                                                                            !!",
-        "!!                          Solo personal autorizado                          !!",
-        "!!                                                                            !!",
-        "!!                          Authorized personal only                          !!",
-        "!!                                                                            !!",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CAUTION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "^C",
-        "banner motd ^C",
-        "********************************************************************************",
-        "**                                                                            **",
-        "**                       AENA - Aeropuerto Barcelona                          **",
-        "**                                                                            **",
-        "**         Division de Tecnologias de la Informacion y Comunicaciones         **",
-        "**                                                                            **",
-        "**                  Esta accediendo a un sistema protegido                    **",
-        "**          Si no esta autorizado cierre inmediatamente su conexion           **",
-        "**                  La manipulacion no autorizada infringe                    **",
-        "**             la ley 21/2003, de 7 de Julio, de Seguridad Aerea              **",
-        "**                                                                            **",
-        "********************************************************************************",
-        "**                                                                            **",
-        "**                         This is a Private System                           **",
-        "**          If you are not authorized close your connection inmediatly        **",
-        "**                    Unauthorized access is regulated by                     **",
-        "**                   Air Security Law 21/2003, 7th of July                    **",
-        "**                                                                            **",
-        "********************************************************************************",
-        "|                          Informacion de Acceso",
-        "|                          Equipo: $(hostname)",
-        "|",
-        "|                       Autorizacion mediante TACACS+",
-        "|",
-        "^C",
-        "banner prompt-timeout ^C",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ADVERTENCIA !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "!!                                                                            !!",
-        "!!                      Ha experiado el tiempo de session                     !!",
-        "!!                                                                            !!",
-        "!!                        Has experienced session time                        !!",
-        "!!                                                                            !!",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "^C",
-        "banner config-save ^C",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMACION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "!!                                                                            !!",
-        "!!         Desea realizar una copia de la configuracion en ejecucion          !!",
-        "!!                                                                            !!",
-        "!!           You want to make a copy of the running configuration             !!",
-        "!!                                                                            !!",
-        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! INFORMATION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
-        "^C",
-        "!",
-        "line con 0",
-        " session-timeout 15",
-        " exec-timeout 15 0",
-        " authorization exec TAC-AUTO",
-        " accounting exec TAC-ACC",
-        " logging synchronous",
-        " login authentication TAC-AUTH",
-        " stopbits 1",
-        "line vty 0 4",
-        " session-timeout 15",
-        " exec-timeout 15 0",
-        " authorization exec TAC-AUTO",
-        " accounting exec TAC-ACC",
-        " logging synchronous",
-        " login authentication TAC-AUTH",
-        " transport preferred ssh",
-        "line vty 5 15",
-        " session-timeout 15",
-        " exec-timeout 15 0",
-        " authorization exec TAC-AUTO",
-        " accounting exec TAC-ACC",
-        " logging synchronous",
-        " login authentication TAC-AUTH",
-        " transport preferred ssh",
+        "snmp-server host 104.16.0.225 version 2c GreBCNro",
+        "snmp-server host 104.16.0.225 version 3 priv V3gesred",
+        "snmp-server host 4.9.0.135 version 2c GreBCNro",
+        "snmp-server host 4.9.0.135 version 3 priv V3gesred",
+        "snmp-server host 104.18.220.10 version 2c GreBCNro",
+        "snmp-server host 104.18.220.10 version 3 priv V3gesred",
         "!",
     ])
+
+    lines.extend(VIDEO_BANNER_LINES)
 
     if ntp_source_if:
         lines.append(f"ntp source {ntp_source_if}")
@@ -2880,13 +3792,70 @@ def _video_extra_base_lines(metadata: Dict[str, Any]) -> List[str]:
 
     return lines
 
+
+def _collect_video_vlan_blocks(
+    metadata_map: Dict[str, Dict[str, Any]],
+    hosts: Iterable[str],
+) -> List[List[str]]:
+    seen_headers: Set[str] = set()
+    blocks: List[List[str]] = []
+    for host in hosts:
+        meta = metadata_map.get(host) or {}
+        for block in meta.get("vlan_blocks", []):
+            if not block:
+                continue
+            header = block[0].strip()
+            if not header.lower().startswith("vlan "):
+                continue
+            key = header.lower()
+            if key in seen_headers:
+                continue
+            seen_headers.add(key)
+            blocks.append(block)
+    return blocks
+
+
+def _collect_video_svi_blocks(
+    iface_cfgs: Dict[Tuple[str, str], List[str]],
+    hosts: Iterable[str],
+) -> List[Tuple[str, List[str]]]:
+    seen_interfaces: Set[str] = set()
+    ordered_hosts = list(dict.fromkeys(hosts))
+    svi_blocks: List[Tuple[str, List[str]]] = []
+    for host in ordered_hosts:
+        for (cfg_host, if_short), block in iface_cfgs.items():
+            if cfg_host != host:
+                continue
+            short_name = to_short_ifname(if_short)
+            if not short_name.lower().startswith("vlan"):
+                continue
+            key = (short_name or "").lower()
+            if key in seen_interfaces:
+                continue
+            seen_interfaces.add(key)
+            svi_blocks.append((short_name, block))
+    return svi_blocks
+
+
 def _emit_base_template(
     f,
     forced_hostname: str,
     which: str,
     *,
     include_vlan_623: bool = False,
+    default_gateway_override: Optional[str] = None,
 ):
+    def _override_default_gateway(line: str) -> str:
+        if not default_gateway_override:
+            return line
+
+        match = DEFAULT_GATEWAY_LINE_RE.match(line)
+        if not match:
+            return line
+
+        prefix, _, suffix = match.groups()
+        return f"{prefix}{default_gateway_override}{suffix}"
+
     def _uca_vlan623_override(line: str) -> str:
         stripped = line.strip()
         lower = stripped.lower()
@@ -2921,7 +3890,8 @@ def _emit_base_template(
     for ln in base_lines:
         if BASE_HOSTNAME_RE.match(ln):
             continue
-        f.write(ln + ("\n" if not ln.endswith("\n") else ""))
+        rewritten = _override_default_gateway(ln)
+        f.write(rewritten + ("\n" if not rewritten.endswith("\n") else ""))
 
     if which in ("POE", "AMBAR_T"):
         extra_lines = _read_template_file(AMBAR_EXTRA_TEMPLATE_PATH)
@@ -2930,7 +3900,8 @@ def _emit_base_template(
         if extra_lines:
             f.write("!\n! === CONFIG BASE AMBAR ADICIONAL ===\n")
             for ln in extra_lines:
-                f.write(ln + ("\n" if not ln.endswith("\n") else ""))
+                rewritten = _override_default_gateway(ln)
+                f.write(rewritten + ("\n" if not rewritten.endswith("\n") else ""))
     elif which == "UCA":
         extra_lines = _read_template_file(UCA_EXTRA_TEMPLATE_PATH)
         if not extra_lines:
@@ -2955,7 +3926,8 @@ def _emit_base_template(
                     if include_vlan_623
                     else ln
                 )
-                f.write(out_line + ("\n" if not out_line.endswith("\n") else ""))
+                rewritten = _override_default_gateway(out_line)
+                f.write(rewritten + ("\n" if not rewritten.endswith("\n") else ""))
 
 
 def _filter_out_sticky(lines: List[str]) -> List[str]:
@@ -2969,6 +3941,8 @@ def _filter_out_sticky(lines: List[str]) -> List[str]:
                 # Descarta líneas que fijan direcciones MAC concretas.
                 continue
         elif re.search(r"switchport\s+port-security\s+violation", ln, re.IGNORECASE):
+            continue
+        elif re.search(r"switchport\s+port-security\s+aging", ln, re.IGNORECASE):
             continue
         else:
             filtered.append(ln)
@@ -3052,30 +4026,29 @@ def _collect_group_vlans(rows: List[List[str]], group_tag: str) -> Set[str]:
 
 
 def _poe_uplink_interfaces() -> List[Tuple[str, str]]:
-    """Return the fixed uplink members for the POE stack (CORE_1/CORE_2)."""
-    if not POE_MEMBER_METADATA:
-        return []
-
-    first_member = min(POE_MEMBER_METADATA.keys())
+    """Return the default uplink members for the POE (UXM/AMBAR) stack."""
+    members = sorted(POE_MEMBER_METADATA.keys())
+    first_member = members[0] if members else 1
+    second_member = members[1] if len(members) > 1 else first_member + 1
     return [
         (f"TwentyFiveGigE{first_member}/1/1", "Interfaz Uplink CORE_1"),
-        (f"TwentyFiveGigE{first_member}/1/2", "Interfaz Uplink CORE_2"),
+        (f"TenGigabitEthernet{second_member}/1/1", "Interfaz Uplink CORE_2"),
     ]
 
 
 def _ambar_t_uplink_interfaces() -> List[Tuple[str, str]]:
     """Uplinks for AMBAR-T stacks (fixed numbering)."""
     return [
-        ("TwentyFiveGigE1/1/2", "Interfaz Uplink CORE_1"),
-        ("TwentyFiveGigE2/1/2", "Interfaz Uplink CORE_2"),
+        ("TwentyFiveGigE1/1/1", "Interfaz Uplink CORE_1"),
+        ("TenGigabitEthernet2/1/1", "Interfaz Uplink CORE_2"),
     ]
 
 
 def _uca_uplink_interfaces() -> List[Tuple[str, str]]:
     """Uplinks for UCA stacks (fixed numbering)."""
     return [
-        ("Twe1/1/1", "Interfaz Uplink CORE_1"),
-        ("Twe1/1/2", "Interfaz Uplink CORE_2"),
+        ("TenGigabitEthernet1/1/1", "Interfaz Uplink CORE_1"),
+        ("TenGigabitEthernet1/1/2", "Interfaz Uplink CORE_2"),
     ]
 
 
@@ -3153,22 +4126,38 @@ def _build_management_vlan_lines(
     return lines
 
 
+def _format_vlan_name(name: str) -> str:
+    """Return a VLAN name safe for configuration usage (no spaces)."""
+
+    if not name:
+        return name
+
+    stripped = name.strip()
+    if not stripped:
+        return stripped
+
+    return re.sub(r"\s+", "_", stripped)
+
+
 def export_config_with_templates(
     rows: List[List[str]],
     out_dir: str,
     which: str,
     iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
-    hostname_ambar: str,
-    hostname_uca: str,
+    switch_number: Union[str, int],
+    is_less_than_200: bool,
+    hostname_map: Optional[Dict[str, str]] = None,
     include_vlan_623: bool = False,
     host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    switch_suffix = str(switch_number).strip()
+    if not switch_suffix:
+        switch_suffix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     out_map = {
-        "POE":      f"config_poe_{ts}.txt",
-        "AMBAR_T":  f"config_ambar_t_{ts}.txt",
-        "UCA":      f"config_uca_t_{ts}.txt",
+        "POE":      f"{switch_suffix}_UXM_Config.txt",
+        "AMBAR_T":  f"{switch_suffix}_AMBAR_Config.txt",
+        "UCA":      f"{switch_suffix}_UCA_Config.txt",
     }
     txt = os.path.join(out_dir, out_map[which])
 
@@ -3180,6 +4169,31 @@ def export_config_with_templates(
 
     for sw_rows in rows_by_switch.values():
         sw_rows.sort(key=lambda r: _stack_interface_sort_key(r[3]))
+
+    poe_display_map: Dict[str, str] = {}
+    if which == "POE":
+        meta_by_name = {
+            str(info.get("sw_name")): info for info in POE_MEMBER_METADATA.values()
+        }
+        for sw_name, sw_rows in rows_by_switch.items():
+            interfaces = [row[3] for row in sw_rows]
+            tags = [row[8] for row in sw_rows]
+            poe_display_map[sw_name] = _poe_display_label(
+                sw_name,
+                interfaces=interfaces,
+                tags=tags,
+                meta_by_name=meta_by_name,
+            )
+
+    poe_default_gateway = "10.192.131.254" if is_less_than_200 else "10.192.130.254"
+    if which in ("POE", "AMBAR_T"):
+        default_gateway_override: Optional[str] = poe_default_gateway
+    elif which == "UCA":
+        default_gateway_override = (
+            "10.192.131.254" if is_less_than_200 else "10.192.129.254"
+        )
+    else:
+        default_gateway_override = None
 
     used_vlans: Set[str] = set()
     for r in rows_sorted:
@@ -3199,11 +4213,22 @@ def export_config_with_templates(
     if which == "AMBAR_T":
         used_vlans.add("623")
 
-    if which == "UCA" and include_vlan_623:
+    if which == "UCA":
         used_vlans.add("2230")
-        used_vlans.add("623")
+        if include_vlan_623:
+            used_vlans.add("623")
 
-    forced_hostname = hostname_ambar if which in ("POE", "AMBAR_T") else hostname_uca
+    forced_hostname = None
+    if hostname_map:
+        forced_hostname = hostname_map.get(which)
+
+    if not forced_hostname:
+        if which in ("POE", "AMBAR_T"):
+            forced_hostname = "AMBAR-SW"
+        elif which == "UCA":
+            forced_hostname = "UCA-SW"
+        else:
+            forced_hostname = "VIDEO-SW"
     switch_locations: Dict[str, str] = {}
     switch_contacts: Dict[str, str] = {}
     if host_metadata:
@@ -3219,6 +4244,7 @@ def export_config_with_templates(
             forced_hostname=forced_hostname,
             which=which,
             include_vlan_623=include_vlan_623,
+            default_gateway_override=default_gateway_override,
         )
         f.write("! ------------------------------------------------------------\n")
 
@@ -3229,7 +4255,7 @@ def export_config_with_templates(
                 f.write(f"vlan {vlan}\n")
                 vlan_name = VLAN_NAME_MAP.get(vlan)
                 if vlan_name:
-                    f.write(f" name {vlan_name}\n")
+                    f.write(f" name {_format_vlan_name(vlan_name)}\n")
                 else:
                     f.write(f" name VLAN_{vlan}\n")
                 f.write("!\n")
@@ -3241,13 +4267,15 @@ def export_config_with_templates(
                 rows_sorted,
                 iface_cfgs,
                 host_metadata,
-                default_gateway="10.192.129.254",
+                default_gateway=default_gateway_override,
             )
             for line in mgmt_lines:
                 f.write(line + "\n")
 
         if which == "UCA":
             uca_allowed_set = {v for v in cleaned_vlans if v != "623"}
+            if not include_vlan_623:
+                uca_allowed_set.add("2230")
             try:
                 uca_allowed = sorted(uca_allowed_set, key=int)
             except ValueError:
@@ -3278,7 +4306,7 @@ def export_config_with_templates(
                 rows_sorted,
                 iface_cfgs,
                 host_metadata,
-                default_gateway="10.192.130.254",
+                default_gateway=poe_default_gateway,
             )
             for line in mgmt_lines:
                 f.write(line + "\n")
@@ -3311,7 +4339,7 @@ def export_config_with_templates(
                 rows_sorted,
                 iface_cfgs,
                 host_metadata,
-                default_gateway="10.192.130.254",
+                default_gateway=poe_default_gateway,
             )
             for line in mgmt_lines:
                 f.write(line + "\n")
@@ -3354,7 +4382,8 @@ def export_config_with_templates(
             if location:
                 f.write(f"snmp-server location {location}\n")
             f.write("!\n")
-            f.write(f"! Interfaces para {sw_new}\n")
+            display_name = poe_display_map.get(sw_new, sw_new) if which == "POE" else sw_new
+            f.write(f"! Interfaces para {display_name}\n")
             for sw_act, if_act, desc_act, if_new, desc_new, _, vlan, mode, tags, mac, _ in rows_by_switch[sw_new]:
                 block = iface_cfgs.get((sw_act, if_act))
                 f.write(f"interface {if_new}\n")
@@ -3440,11 +4469,16 @@ def export_config_video(
     out_dir: str,
     iface_cfgs: Dict[Tuple[str, str], List[str]],
     *,
-    hostname_video: str,
+    switch_number: Union[str, int],
+    hostname: Optional[str] = None,
+    video_level: str,
     host_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    txt = os.path.join(out_dir, f"config_video_{ts}.txt")
+    switch_suffix = str(switch_number).strip()
+    if not switch_suffix:
+        switch_suffix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    txt = os.path.join(out_dir, f"{switch_suffix}_VIDEO_Config.txt")
 
     rows_sorted = [r for r in rows if r[-1] == "VIDEO" and r[0] != "LIBRE"]
 
@@ -3452,26 +4486,60 @@ def export_config_video(
     for row in rows_sorted:
         rows_by_switch.setdefault(row[5], []).append(row)
 
+    display_label_map = {
+        sw: _video_display_label([r[3] for r in grp]) for sw, grp in rows_by_switch.items()
+    }
+
     metadata_map = host_metadata or {}
     base_metadata: Dict[str, Any] = {}
     if rows_sorted:
         first_host = rows_sorted[0][0]
         base_metadata = metadata_map.get(first_host, {})
 
-    base_lines = _video_extra_base_lines(base_metadata)
+    base_lines = _video_extra_base_lines(base_metadata, level=video_level)
 
     switch_locations = _collect_switch_locations(rows, "VIDEO", metadata_map)
     switch_contacts = _collect_switch_contacts(rows, "VIDEO", metadata_map)
 
+    forced_hostname = hostname or "VIDEO-SW"
+
     with open(txt, "w", encoding="utf-8") as f:
         f.write("!\n! Configuración generada (VIDEO)\n!\n")
-        f.write(f"hostname {hostname_video}\n")
+        f.write(f"hostname {forced_hostname}\n")
         for ln in base_lines:
             if ln.endswith("\n"):
                 f.write(ln)
             else:
                 f.write(ln + "\n")
+        video_hosts = [row[0] for row in rows_sorted if row[0] != "LIBRE"]
+        extra_sections: List[List[str]] = []
+        if video_level == "3" and video_hosts:
+            vlan_blocks = _collect_video_vlan_blocks(metadata_map, video_hosts)
+            if vlan_blocks:
+                section_lines: List[str] = ["! --- DEFINICIÓN DE VLANES NIVEL 3 ---"]
+                for block in vlan_blocks:
+                    for line in block:
+                        section_lines.append(line)
+                extra_sections.append(section_lines)
+
+            svi_blocks = _collect_video_svi_blocks(iface_cfgs, video_hosts)
+            if svi_blocks:
+                section_lines = ["! --- INTERFACES VLAN NIVEL 3 ---"]
+                for if_name, block in svi_blocks:
+                    section_lines.append(f"interface {if_name}")
+                    for ln in block:
+                        section_lines.append(ln)
+                    section_lines.append("!")
+                extra_sections.append(section_lines)
+
         f.write("! ------------------------------------------------------------\n")
+        for section in extra_sections:
+            for line in section:
+                if line.endswith("\n"):
+                    f.write(line)
+                else:
+                    f.write(line + "\n")
+            f.write("! ------------------------------------------------------------\n")
 
         if not rows_by_switch:
             f.write("!\nend\n!\n")
@@ -3484,19 +4552,45 @@ def export_config_video(
             if location:
                 f.write(f"snmp-server location {location}\n")
             f.write("!\n")
-            f.write(f"! Interfaces para {sw_new}\n")
+            display_name = display_label_map.get(sw_new, sw_new)
+            f.write(f"! Interfaces para {display_name}\n")
             for sw_act, if_act, desc_act, if_new, desc_new, _sw_name, _vlan, _mode, _tags, _mac, _grupo in rows_by_switch[sw_new]:
                 block = iface_cfgs.get((sw_act, if_act))
                 f.write(f"interface {if_new}\n")
+                mode_lc = (_mode or "").lower()
+                out_lines: List[str] = []
+
                 if block:
-                    for ln in block:
+                    filtered = _filter_out_sticky(block)
+                    for ln in filtered:
                         if re.match(r"^\s*interface\b", ln, re.IGNORECASE):
                             continue
-                        f.write(ln if ln.endswith("\n") else ln + "\n")
+                        out_lines.append(ln if ln.endswith("\n") else ln)
                 else:
-                    f.write(f" ! running-config no encontrado para {sw_act} {if_act}\n")
+                    out_lines.append(f" ! running-config no encontrado para {sw_act} {if_act}")
                     if desc_new and desc_new != "N/A":
-                        f.write(f" description {desc_new}\n")
+                        out_lines.append(f" description {desc_new}")
+
+                if mode_lc != "trunk":
+                    existing = {
+                        _normalize_command(cmd)
+                        for cmd in out_lines
+                        if cmd and not cmd.strip().startswith("!")
+                    }
+                    for required in (
+                        " switchport port-security mac-address sticky",
+                        " switchport port-security",
+                    ):
+                        norm = _normalize_command(required)
+                        if norm and norm not in existing:
+                            out_lines.append(required)
+                            existing.add(norm)
+
+                for line in out_lines:
+                    if line.endswith("\n"):
+                        f.write(line)
+                    else:
+                        f.write(line + "\n")
                 f.write("!\n")
 
         f.write("!\nend\n!\n")
@@ -3580,27 +4674,36 @@ def resolve_cli_inputs(args: Iterable[str]) -> List[str]:
         raise SystemExit(1)
     return resolved
 
-def prompt_yes_no(question: str, *, default: bool = False) -> bool:
-    yes_values = {"si", "sí", "s", "y", "yes"}
-    no_values = {"no", "n"}
-
-    suffix = " [S/N]" if default else " [s/n]"
-    prompt = f"{question.strip()}{suffix}: "
-
+def prompt_switch_number() -> int:
     while True:
-        answer = input(prompt).strip().lower()
-        if not answer:
-            return default
-        if answer in yes_values:
-            return True
-        if answer in no_values:
-            return False
-        print("  - Responde 'Si' o 'No' (también se aceptan S/N).")
+        raw = input("Introduce el número del switch: ").strip()
+        if not raw:
+            print("  - Debes introducir un número de switch (por ejemplo 714).")
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            print("  - Introduce un número válido (por ejemplo 714).")
+            continue
+        return value
+
+def ensure_output_dir(path: str) -> str:
+    path = sanitize_path(path)
+    try:
+        os.makedirs(path, exist_ok=True)
+        return path
+    except OSError as exc:
+        fallback = os.path.join(os.getcwd(), "SalidaScript")
+        print(f"  - Aviso: no se pudo crear la ruta de salida '{path}'. ({exc})")
+        print(f"    Se usará la ruta local: {fallback}")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
 
 # ---------- Main ----------
 
 if __name__ == "__main__":
-    is_less_than_200 = prompt_yes_no("¿El switch es menor de 200? Si/No")
+    switch_number = prompt_switch_number()
+    is_less_than_200 = switch_number < 200
     include_vlan_623 = is_less_than_200
 
     cli_args = sys.argv[1:]
@@ -3647,23 +4750,37 @@ if __name__ == "__main__":
         trunk_items,
         all_iface_cfgs,
         host_metadata,
+        skipped_ports,
     ) = build_inventory_from_logs(inputs)
 
     poe_rows, ambar_overflow = make_mapping_poe(wifi_items, voip_items, ambar_other_items, trunk_items)
     ambar_t_rows = make_mapping_ambar_t(ambar_overflow) if ambar_overflow else []
     uca_reserved_tail = UCA_RESERVED_TAIL_FREE + (1 if include_vlan_623 else 0)
     uca_rows = make_mapping_uca(uca_items, reserved_tail=uca_reserved_tail)
-    _apply_uca_management_trunks(uca_rows, include_mgmt_vlan=include_vlan_623)
+    _, base_uca_allowed = _collect_trunk_allowed_from_rows(uca_rows, "UCA")
+    uca_trunk_allowed = base_uca_allowed
+    if include_vlan_623:
+        allowed_with_mgmt = _apply_uca_management_trunks(
+            uca_rows,
+            include_mgmt_vlan=include_vlan_623,
+        )
+        if allowed_with_mgmt:
+            uca_trunk_allowed = allowed_with_mgmt
+    _ensure_poe_downlink_trunk(poe_rows, uca_trunk_allowed)
     if video_inputs:
         video_rows, video_iface_cfgs, video_metadata = make_mapping_video(video_inputs)
         host_metadata.update(video_metadata)
     else:
         video_rows, video_iface_cfgs = [], {}
 
-    print("\nIntroduce los hostnames base para las plantillas:")
-    hostname_ambar = input("Hostname para switches AMBAR (POE y AMBAR_T): ").strip() or "AMBAR-SW"
-    hostname_uca   = input("Hostname para switches UCA: ").strip() or "UCA-SW"
-    hostname_video = input("Hostname para switches VIDEO: ").strip() or "VIDEO-SW"
+    video_level = "2"
+    if video_rows:
+        while True:
+            raw_level = input("Nivel del switch de VIDEO (2/3): ").strip()
+            if raw_level in {"2", "3"}:
+                video_level = raw_level
+                break
+            print("  - Introduce '2' o '3' para indicar el nivel del switch de VIDEO.")
 
     _sort_group_rows(poe_rows)
     if ambar_t_rows:
@@ -3687,38 +4804,74 @@ if __name__ == "__main__":
 
     all_rows = wifi_poe_rows + non_wifi_poe_rows + ambar_t_rows + uca_rows + video_rows
 
-    out_dir = "Amigrar"
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = ensure_output_dir(
+        r"X:\\AENA\\Postventa\\2024\\OP046517 Renovacion Acceso AO Barcelona\\3 Documentación\\33 TIC\\Migraciones\\SalidaScript"
+    )
 
-    xlsx_path = export_excel(all_rows, out_dir)
+    xlsx_path = export_excel(all_rows, out_dir, switch_number, skipped_ports=skipped_ports)
+
+    hostname_plan = build_hostname_plan(
+        host_metadata,
+        switch_number,
+        include_poe=bool(poe_rows),
+        include_ambar_t=bool(ambar_t_rows),
+        include_uca=bool(uca_rows),
+        include_video=bool(video_rows),
+    )
 
     cfg_poe   = export_config_with_templates(
         all_rows, out_dir, which="POE", iface_cfgs=all_iface_cfgs,
-        hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
+        switch_number=switch_number,
+        is_less_than_200=is_less_than_200,
+        hostname_map=hostname_plan,
         include_vlan_623=include_vlan_623,
         host_metadata=host_metadata,
     )
-    cfg_amb_t = export_config_with_templates(
-        all_rows, out_dir, which="AMBAR_T", iface_cfgs=all_iface_cfgs,
-        hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
-        include_vlan_623=include_vlan_623,
-        host_metadata=host_metadata,
-    ) if ambar_t_rows else None
-    cfg_uca_t = export_config_with_templates(
-        all_rows, out_dir, which="UCA", iface_cfgs=all_iface_cfgs,
-        hostname_ambar=hostname_ambar, hostname_uca=hostname_uca,
-        include_vlan_623=include_vlan_623,
-        host_metadata=host_metadata,
-    ) if uca_rows else None
+    cfg_amb_t = None
+    if ambar_t_rows:
+        cfg_amb_t = export_config_with_templates(
+            all_rows, out_dir, which="AMBAR_T", iface_cfgs=all_iface_cfgs,
+            switch_number=switch_number,
+            is_less_than_200=is_less_than_200,
+            hostname_map=hostname_plan,
+            include_vlan_623=include_vlan_623,
+            host_metadata=host_metadata,
+        )
+    cfg_uca_t = None
+    if uca_rows:
+        cfg_uca_t = export_config_with_templates(
+            all_rows, out_dir, which="UCA", iface_cfgs=all_iface_cfgs,
+            switch_number=switch_number,
+            is_less_than_200=is_less_than_200,
+            hostname_map=hostname_plan,
+            include_vlan_623=include_vlan_623,
+            host_metadata=host_metadata,
+        )
     combined_cfgs = {**all_iface_cfgs, **video_iface_cfgs}
-    cfg_video = export_config_video(
-        all_rows, out_dir,
-        iface_cfgs=combined_cfgs,
-        hostname_video=hostname_video,
-        host_metadata=host_metadata,
-    ) if video_rows else None
+    cfg_video = None
+    if video_rows:
+        cfg_video = export_config_video(
+            all_rows, out_dir,
+            iface_cfgs=combined_cfgs,
+            switch_number=switch_number,
+            hostname=hostname_plan.get("VIDEO"),
+            video_level=video_level,
+            host_metadata=host_metadata,
+        )
 
     print("\n¡Hecho!")
+    if hostname_plan:
+        print("  Hostnames generados:")
+        name_labels = {
+            "POE": "POE/UXM",
+            "AMBAR_T": "AMBAR-T",
+            "UCA": "UCA",
+            "VIDEO": "VIDEO",
+        }
+        for key in ("POE", "AMBAR_T", "UCA", "VIDEO"):
+            if key in hostname_plan:
+                label = name_labels.get(key, key)
+                print(f"    {label}: {hostname_plan[key]}")
     print(f"  Excel: {os.path.abspath(xlsx_path)}")
     print(f"  Config POE:     {os.path.abspath(cfg_poe)}")
     if cfg_amb_t:
