@@ -904,6 +904,9 @@ def to_short_ifname(ifname: str) -> str:
 
 def normalize_port(p: str) -> str:
     p = p.strip()
+    m = re.search(r"(Vl|Vlan)\s*(\d+)", p, re.IGNORECASE)
+    if m:
+        return f"Vlan{m.group(2)}"
     m = re.search(r"(Fa|Gi|Te|Tw|Twe)\d+(?:/\d+){0,2}", p, re.IGNORECASE)
     return m.group(0) if m else ""
 
@@ -1118,6 +1121,16 @@ def _description_from_block(block: Optional[List[str]]) -> Optional[str]:
         m = re.match(r"^\s*description\s+(.+)$", ln, re.IGNORECASE)
         if m:
             return m.group(1).strip()
+    return None
+
+
+def _access_vlan_from_block(block: Optional[List[str]]) -> Optional[str]:
+    if not block:
+        return None
+    for ln in block:
+        m = re.match(r"^\s*switchport\s+access\s+vlan\s+(\d+)\s*$", ln, re.IGNORECASE)
+        if m:
+            return m.group(1)
     return None
 
 
@@ -1582,7 +1595,6 @@ def build_inventory_from_logs(filepaths: List[str]):
             if_short: _description_from_block(block)
             for if_short, block in iface_cfg_map.items()
         }
-
         for r in int_rows:
             status_display = r["status"]
             status = status_display.lower()
@@ -2449,6 +2461,10 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
             if_short: _description_from_block(block)
             for if_short, block in iface_cfg_map.items()
         }
+        access_vlan_map = {
+            if_short: _access_vlan_from_block(block)
+            for if_short, block in iface_cfg_map.items()
+        }
 
         with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
             lines = fh.readlines()
@@ -2471,7 +2487,9 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
                 )
             if not desc:
                 desc = "N/A"
-            macs = mac_map.get(if_src) or []
+            access_vlan = access_vlan_map.get(if_src)
+            vlan_key = f"Vlan{access_vlan}" if access_vlan else None
+            macs = mac_map.get(if_src) or (mac_map.get(vlan_key) if vlan_key else []) or []
             mac_value = ";".join(macs) if macs else "N/A"
             new_if = _resolve_new_interface(NEW_IF_VIDEO_PREFIX, new_idx)
             new_idx += 1
