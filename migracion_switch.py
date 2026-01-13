@@ -2567,18 +2567,7 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
             lines = fh.readlines()
         order = parse_video_interface_order(lines)
         interface_ip_map, vlan_ip_map = parse_ip_interface_brief(lines)
-        interface_ips = _collect_interface_ips(iface_cfg_map, interface_ip_map)
-        vlan_ips = _collect_vlan_ips(iface_cfg_map, vlan_ip_map)
-        vlan_ip_index = {ip: vlan for vlan, ip in vlan_ips.items() if ip}
-        vlan_suffix_index: Dict[Tuple[int, int], str] = {}
-        for vlan_name, vlan_ip in vlan_ips.items():
-            suffix = _ip_suffix(vlan_ip)
-            if not suffix:
-                continue
-            if suffix in vlan_suffix_index:
-                vlan_suffix_index[suffix] = ""
-            else:
-                vlan_suffix_index[suffix] = vlan_name
+        ip_to_vlan = {ip: vlan for vlan, ip in vlan_ip_map.items() if ip}
         if not order:
             order = sorted(iface_cfg_map.keys(), key=_stack_interface_sort_key)
 
@@ -2597,23 +2586,13 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
                 )
             if not desc:
                 desc = "N/A"
-            access_vlan = access_vlan_map.get(if_src)
-            vlan_key = f"Vlan{access_vlan}" if access_vlan else None
+            vlan_key = None
+            ip_addr = interface_ip_map.get(if_src)
+            if ip_addr:
+                vlan_key = ip_to_vlan.get(ip_addr)
             if not vlan_key:
-                for ip_addr in interface_ips.get(if_src, set()):
-                    vlan_name = vlan_ip_index.get(ip_addr)
-                    if vlan_name:
-                        vlan_key = vlan_name
-                        break
-            if not vlan_key:
-                for ip_addr in interface_ips.get(if_src, set()):
-                    suffix = _ip_suffix(ip_addr)
-                    if not suffix:
-                        continue
-                    vlan_name = vlan_suffix_index.get(suffix)
-                    if vlan_name:
-                        vlan_key = vlan_name
-                        break
+                access_vlan = access_vlan_map.get(if_src)
+                vlan_key = f"Vlan{access_vlan}" if access_vlan else None
             macs = mac_map.get(if_src) or (mac_map.get(vlan_key) if vlan_key else []) or []
             mac_value = ";".join(macs) if macs else "N/A"
             new_if = _resolve_new_interface(NEW_IF_VIDEO_PREFIX, new_idx)
