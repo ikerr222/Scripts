@@ -324,6 +324,18 @@ def is_uxm_model(model_name):
     return model_name == 'C9300-48UXM'
 
 
+def build_destination_ports(stack_models):
+    """Genera la lista ordenada de puertos destino por unidad y rango."""
+    ordered_ports = []
+    for unit_id in sorted(stack_models.keys()):
+        model = stack_models[unit_id]
+        rules = PORT_MAPPING_RULES.get(model, {})
+        for prefix, (start, end) in rules.items():
+            for port_num in range(start, end + 1):
+                ordered_ports.append(f"{prefix}{unit_id}/0/{port_num}")
+    return ordered_ports
+
+
 def is_excluded(interface_config):
     """Determina si un puerto está excluido por configuración (VLAN 1 o shutdown)."""
     if re.search(r"^\s*shutdown\s*$", interface_config, re.MULTILINE | re.IGNORECASE):
@@ -922,7 +934,7 @@ def process_video_migration(migratable_interfaces, dest_stack_obj, stack_models)
 # 4. FUNCIONES DE REPORTE
 # ==============================================================================
 
-def generate_mapping_excel(global_port_map, dest_hostname, timestamp_suffix, migration_type, source_switches):
+def generate_mapping_excel(global_port_map, dest_hostname, timestamp_suffix, migration_type, source_switches, stack_models):
     """Genera el fichero Excel de mapeo, incluyendo Huecos Generados y scsf segregados, y resalta PoE."""
     global HUECO_CANDIDATES
 
@@ -954,7 +966,8 @@ def generate_mapping_excel(global_port_map, dest_hostname, timestamp_suffix, mig
             'Hostname Nuevo': mapping_info['new_sw'],
             'Interface Nuevo': mapping_info['new_port'],
             'Status': mapping_info['status'],
-            'MAC Origen': macs_text
+            'MAC Origen': macs_text,
+            'MAC Nueva': ''
         }
 
         status = mapping_info['status']
@@ -986,11 +999,33 @@ def generate_mapping_excel(global_port_map, dest_hostname, timestamp_suffix, mig
                 'Hostname Nuevo': dest_hostname,
                 'Interface Nuevo': hueco_port,
                 'Status': 'HUECO_NO_RELLENO',
-                'MAC Origen': 'N/A'
+                'MAC Origen': 'N/A',
+                'MAC Nueva': ''
             })
 
     mapping_data = migrated_entries + hueco_filled_entries + unfilled_hueco_entries + not_migrated_entries
-    df = pd.DataFrame(mapping_data)
+    expected_ports = build_destination_ports(stack_models)
+    mapping_by_new_port = {entry['Interface Nuevo']: entry for entry in mapping_data}
+    ordered_entries = []
+    for new_port in expected_ports:
+        entry = mapping_by_new_port.get(new_port)
+        if entry:
+            ordered_entries.append(entry)
+        else:
+            ordered_entries.append({
+                'Hostname Origen': 'N/A',
+                'Interface Origen': 'N/A',
+                'Description Origen': 'PUERTO SIN ASIGNAR',
+                'VLAN Origen': 'N/A',
+                'Modo Puerto Origen': 'N/A',
+                'Hostname Nuevo': dest_hostname,
+                'Interface Nuevo': new_port,
+                'Status': 'PUERTO_SIN_ASIGNAR',
+                'MAC Origen': 'N/A',
+                'MAC Nueva': ''
+            })
+    df = pd.DataFrame(ordered_entries)
+    df['Comparacion MAC'] = ''
 
     try:
         writer = pd.ExcelWriter(output_filename, engine='xlsxwriter')
@@ -1007,6 +1042,12 @@ def generate_mapping_excel(global_port_map, dest_hostname, timestamp_suffix, mig
         poe_format = workbook.add_format({'bg_color': '#D9EAD3', 'font_color': '#1D5A3C', 'bold': True})
 
         for row_num, status in enumerate(df['Status']):
+            excel_row = row_num + 2
+            worksheet.write_formula(
+                row_num + 1,
+                df.columns.get_loc('Comparacion MAC'),
+                f'=SI(I{excel_row}=J{excel_row};"CORRECTA";"DIFERENTES")'
+            )
 
             if status == 'HUECO_NO_RELLENO':
                 worksheet.set_row(row_num + 1, None, orange_format)
@@ -1437,7 +1478,14 @@ def main():
 
     map_trunk_ports_interactively(GLOBAL_PORT_MAP, dest_stack_obj.name)
 
-    generate_mapping_excel(GLOBAL_PORT_MAP, destination_hostname, timestamp_suffix, migration_type, source_switches)
+    generate_mapping_excel(
+        GLOBAL_PORT_MAP,
+        destination_hostname,
+        timestamp_suffix,
+        migration_type,
+        source_switches,
+        stack_models
+    )
     generate_tracking_report(source_switches, GLOBAL_PORT_MAP, destination_hostname, timestamp_suffix, migration_type)
     export_configs(dest_stack_obj, timestamp_suffix, all_vlans_info, migration_type)
 
