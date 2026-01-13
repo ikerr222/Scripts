@@ -1146,6 +1146,22 @@ def _ip_from_block(block: Optional[List[str]]) -> Optional[str]:
     return None
 
 
+def _ip_map_from_iface_cfgs(
+    iface_cfg_map: Dict[str, List[str]],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    interface_ip_map: Dict[str, str] = {}
+    vlan_ip_map: Dict[str, str] = {}
+    for if_short, block in iface_cfg_map.items():
+        ip_addr = _ip_from_block(block)
+        if not ip_addr:
+            continue
+        short = to_short_ifname(if_short)
+        interface_ip_map[short] = ip_addr
+        if short.lower().startswith("vlan"):
+            vlan_ip_map[short] = ip_addr
+    return interface_ip_map, vlan_ip_map
+
+
 def _expand_vlan_token(token: str) -> List[str]:
     token = token.strip()
     if not token or token.lower() in {"none", "all"}:
@@ -2503,6 +2519,9 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
             lines = fh.readlines()
         order = parse_video_interface_order(lines)
         interface_ip_map, vlan_ip_map = parse_ip_interface_brief(lines)
+        iface_ip_cfg_map, vlan_ip_cfg_map = _ip_map_from_iface_cfgs(iface_cfg_map)
+        interface_ip_map = {**iface_ip_cfg_map, **interface_ip_map}
+        vlan_ip_map = {**vlan_ip_cfg_map, **vlan_ip_map}
         if not order:
             order = sorted(iface_cfg_map.keys(), key=_stack_interface_sort_key)
 
@@ -2524,7 +2543,7 @@ def make_mapping_video(video_logs: List[str]) -> Tuple[List[List[str]], Dict[Tup
             access_vlan = access_vlan_map.get(if_src)
             vlan_key = f"Vlan{access_vlan}" if access_vlan else None
             if not vlan_key:
-                ip_addr = interface_ip_map.get(if_src) or _ip_from_block(iface_cfg_map.get(if_src))
+                ip_addr = interface_ip_map.get(if_src)
                 if ip_addr:
                     for vlan_name, vlan_ip in vlan_ip_map.items():
                         if vlan_ip == ip_addr:
